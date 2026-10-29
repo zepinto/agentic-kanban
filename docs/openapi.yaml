@@ -1159,6 +1159,264 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/tasks/{task_id}/analyse:
+    post:
+      summary: Analyse Task
+      description: 'Send a card to the analyst agent: it moves to Analysis and an
+
+        ``analysis_requested`` event fires (a ``task_event`` rule starts the
+
+        analyst on the project''s analyst model).'
+      operationId: analyse_task_api_tasks__task_id__analyse_post
+      parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Task Id
+      - name: x-kanban-actor
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Kanban-Actor
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Analyse Task Api Tasks  Task Id  Analyse Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/tasks/{task_id}/reports:
+    post:
+      summary: Post Report
+      description: 'Post a progress update or a result. Assets carry their body as
+
+        ``text`` (mermaid, Plotly JSON, SVG), ``figure`` (Plotly) or
+
+        ``data_base64`` (images, SVG, files). ``final: true`` posts a result and
+
+        moves the card to Results.'
+      operationId: post_report_api_tasks__task_id__reports_post
+      parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Task Id
+      - name: x-kanban-actor
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Kanban-Actor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportCreate'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Post Report Api Tasks  Task Id  Reports Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      summary: Task Reports
+      operationId: task_reports_api_tasks__task_id__reports_get
+      parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Task Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Task Reports Api Tasks  Task Id  Reports Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/reports/{report_id}:
+    get:
+      summary: Get Report
+      operationId: get_report_api_reports__report_id__get
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: Report Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Report Api Reports  Report Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/reports/{report_id}/review:
+    post:
+      summary: Review Report
+      description: 'Accept a result (card → Done) or request changes (card → In
+
+        progress; the comment is sent to the agent). Reviews are the human''s.'
+      operationId: review_report_api_reports__report_id__review_post
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: Report Id
+      - name: x-kanban-actor
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Kanban-Actor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Review Report Api Reports  Report Id  Review Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/reports:
+    get:
+      summary: Gallery
+      description: Visual assets (snapshots, SVG, Plotly, Mermaid) of a project's
+        reports, newest first.
+      operationId: gallery_api_reports_get
+      parameters:
+      - name: project
+        in: query
+        required: true
+        schema:
+          type: string
+          description: project slug
+          title: Project
+        description: project slug
+      - name: kind
+        in: query
+        required: false
+        schema:
+          type: string
+          description: result, progress, or all
+          default: result
+          title: Kind
+        description: result, progress, or all
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 1000
+          minimum: 1
+          default: 200
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Gallery Api Reports Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/assets/{asset_id}:
+    get:
+      summary: Get Asset
+      operationId: get_asset_api_assets__asset_id__get
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: integer
+          title: Asset Id
+      - name: download
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Download
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/snapshot:
     post:
       summary: Snapshot
@@ -1309,6 +1567,45 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
+    AssetIn:
+      properties:
+        type:
+          type: string
+          title: Type
+          description: mermaid / plotly / snapshot / svg / file
+        caption:
+          type: string
+          title: Caption
+          default: ''
+        text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Text
+          description: mermaid source, Plotly JSON or SVG markup
+        figure:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Figure
+          description: Plotly figure object
+        data_base64:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Data Base64
+          description: image / svg / file bytes, base64
+        filename:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Filename
+      additionalProperties: false
+      type: object
+      required:
+      - type
+      title: AssetIn
     AssignRequest:
       properties:
         assignee:
@@ -1419,6 +1716,18 @@ components:
           - type: 'null'
           title: Parent Id
           description: message this one answers
+        report_id:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Report Id
+          description: report the message comments on
+        asset_id:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Asset Id
+          description: figure (asset) the message comments on
       additionalProperties: false
       type: object
       required:
@@ -1550,6 +1859,55 @@ components:
           title: Analyst Model
       type: object
       title: ProjectUpdate
+    ReportCreate:
+      properties:
+        title:
+          type: string
+          title: Title
+        summary_md:
+          type: string
+          title: Summary Md
+          default: ''
+        kind:
+          type: string
+          title: Kind
+          description: progress or result
+          default: progress
+        final:
+          type: boolean
+          title: Final
+          description: result report that moves the card to Results
+          default: false
+        session_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Session Id
+        assets:
+          items:
+            $ref: '#/components/schemas/AssetIn'
+          type: array
+          title: Assets
+      additionalProperties: false
+      type: object
+      required:
+      - title
+      title: ReportCreate
+    ReviewRequest:
+      properties:
+        decision:
+          type: string
+          title: Decision
+          description: accept or changes
+        comment:
+          type: string
+          title: Comment
+          default: ''
+      additionalProperties: false
+      type: object
+      required:
+      - decision
+      title: ReviewRequest
     SessionRegister:
       properties:
         id:
@@ -1852,3 +2210,4 @@ components:
       - msg
       - type
       title: ValidationError
+

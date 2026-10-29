@@ -1,15 +1,17 @@
 # Agent launcher
 
-Scripts the kanban invokes via a `run_command` action when a card lands in
-a given column. The goal: **"drag a task into Approved → the agent picks it
-up itself and drives it to Testing"** — and when it doesn't, the card says
-why instead of sitting in Analyst forever.
+Scripts the kanban invokes via a `run_command` action when something happens
+to a card. The goal: **"approve a card → an agent picks it up on the card's
+model and drives it to Results with a report"** — and when it doesn't, the card
+says why instead of sitting in In progress forever. The same script also runs
+the **analyst** (*Analyse with agent*) and **resumes** an agent when you message
+a card whose agent has stopped.
 
 ## What's in here
 
 | File | What it does |
 |---|---|
-| [`launch-claude.sh`](launch-claude.sh) | Runs Claude Code (`claude -p`) headless in the project directory, with the kanban MCP server passed explicitly, a hard timeout, and a safety net that blocks the card with a reason if the agent leaves it behind. |
+| [`launch-claude.sh`](launch-claude.sh) | `launch-claude.sh <task_id> <project_id> [work\|analyse\|resume]` — runs Claude Code (`claude -p`) headless in the project directory, with the kanban MCP server passed explicitly, the message Stop hook, a hard timeout, and a safety net that blocks the card with a reason if the agent leaves it behind. |
 
 ## How to wire it up
 
@@ -46,6 +48,41 @@ why instead of sitting in Analyst forever.
 
 It fires no matter who moves the card: a drag-drop, an MCP agent, a script
 calling the REST API, or a card created directly in Approved.
+
+## Modes
+
+| Mode | Fired by | Model | What the agent is told | Afterwards |
+|---|---|---|---|---|
+| `work` (default) | `task_moved` → `approved` | the card's `agent_model` | claim the card (`kanban_pull`), do it, verify, end with `report_post(final=true)` (→ Results) | blocks the card if it was left in approved / in_progress |
+| `analyse` | `task_event` `analysis_requested` (*Analyse with agent*) | the project's analyst model | read the code (read-only tools), refine story and acceptance criteria, split oversized work, pick the worker model, end with `analysis_submit` | comments *analysis submitted by …* or *finished without submitting*; the card stays in Analysis for you to approve |
+| `resume` | `task_event` `message` with `agent: offline` | the session's model | `--resume <last session>`: read your messages with `inbox_get`, act, answer with `inbox_reply`; post a new result if you asked for changes | blocks only if the card was meant to be worked on and was left behind |
+
+`resume` needs a session to continue: the card's assigned session, else the
+session that proposed it. Without one the launcher comments and exits.
+
+```json
+{
+  "rules": [
+    {"name": "Worker on approval",
+     "trigger": {"type": "task_moved", "to_status": "approved"},
+     "action": {"type": "run_command", "cmd": "/abs/path/to/launch-claude.sh",
+                "args": ["{task_id}", "{project_id}"], "max_concurrent": 2, "max_runs": 3}},
+    {"name": "Analyst",
+     "trigger": {"type": "task_event", "action": "analysis_requested"},
+     "action": {"type": "run_command", "cmd": "/abs/path/to/launch-claude.sh",
+                "args": ["{task_id}", "{project_id}", "analyse"], "max_concurrent": 1}},
+    {"name": "Resume on message",
+     "trigger": {"type": "task_event", "action": "message", "agent": "offline"},
+     "action": {"type": "run_command", "cmd": "/abs/path/to/launch-claude.sh",
+                "args": ["{task_id}", "{project_id}", "resume"], "max_runs": 5}}
+  ]
+}
+```
+
+`task_event` triggers take `action` (`analysis_requested`, `message`,
+`comment`, `report`, `reply`), `agent` (`offline`: no live session and no
+running command on the card; `live`: the opposite) and `from` (`human`, the
+default, or `any`), so an agent's own replies never wake it up again.
 
 ## What the launcher does
 
@@ -112,7 +149,8 @@ Set these in the rule's `"env"` object.
 | `CLAUDE_BIN` | auto | path to the `claude` CLI |
 | `CLAUDE_MODEL_S` / `_M` / `_L` | CLI default | fallback model by card size, used only when the card has no `agent_model` (opus / sonnet / haiku, chosen in Analysis) |
 | `KANBAN_PERMISSION_MODE` | `dontAsk` | `acceptEdits` / `bypassPermissions` if you know why |
-| `KANBAN_ALLOWED_TOOLS` | `Bash Read Edit Write Grep Glob TodoWrite` | tools besides the kanban ones |
+| `KANBAN_ALLOWED_TOOLS` | `Bash Read Edit Write Grep Glob TodoWrite` | tools besides the kanban ones (work / resume) |
+| `KANBAN_ANALYST_ALLOWED_TOOLS` | `Read Grep Glob` | tools besides the kanban ones in `analyse` mode |
 | `KANBAN_STRICT_MCP` | `1` | `0` also loads the project's own `.mcp.json` servers |
 | `KANBAN_GATE_CMD` | — | command that must pass before a card stays in results |
 | `KANBAN_RUNS_DIR` | `~/Library/Logs/agent-kanban/runs` | per-card run folders |
@@ -129,6 +167,10 @@ Substituted into `args`:
 | `{status}` | the card's column when the rule fired |
 | `{from_status}` | column the card came from (empty for a created card) |
 | `{to_status}` | column the card moved to |
+
+`task_event` rules provide `{task_id}`, `{title}`, `{project_id}`, `{status}`,
+`{action}`, `{actor}`, `{comment}` (the message text), `{session_id}` and
+`{model}` instead of the from/to columns.
 
 ## Concurrency and runaway protection
 

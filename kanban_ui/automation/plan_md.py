@@ -199,17 +199,24 @@ When you take a task from the kanban:
 2. **As you work** — `kanban_comment(task_id, ...)` with the plan,
    blockers, decisions. These land in the task history and show up in
    the UI. `session_status(note=...)` updates your chip on the board.
-3. **When implementation is complete** — `kanban_move(task_id, "results",
-   comment="what was done and how it was verified")`. **Never move a task
-   to `done` or `approved` yourself** — those are the human's calls (the
-   MCP server refuses them by default).
+3. **When implementation is complete** — `report_post(title, summary_md,
+   final=true, assets=[...])`: what was done and how it was verified, with
+   figures where they help (`plotly` figure JSON, `snapshot` PNG, `mermaid`,
+   `svg`). It moves the card to `results` for review; progress reports
+   (`final=false`) are welcome along the way. **Never move a task to `done`
+   or `approved` yourself** — those are the human's calls (the MCP server
+   refuses them by default).
 4. If you get stuck — `kanban_move(task_id, "blocked", comment="the
    specific question")` and `session_status(status="waiting_input")`.
 5. New work you discover — `task_propose(title, description, acceptance)`
    (or `type="story"` with `story_as_a` / `story_i_want` / `story_so_that`);
    it lands in this project's Backlog marked as your proposal. Do not keep
    a parallel task list in markdown files: the board does not read them.
-6. Acting on a card you have not looked at for a while — pass
+6. **Messages from the human** — when a response carries `inbox_pending`
+   (or a `<channel>` event arrives), call `inbox_get`, act on each message
+   (comments may point at one of your figures) and answer with
+   `inbox_reply`. Do this before you stop.
+7. Acting on a card you have not looked at for a while — pass
    `expected_from=<status you saw>` to `kanban_move`, so a card a human
    has meanwhile moved is not overwritten.
 

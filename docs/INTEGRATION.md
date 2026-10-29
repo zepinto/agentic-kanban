@@ -50,7 +50,7 @@ It writes (or merges into) `~/code/myproj/.mcp.json` and refreshes the "Kanban b
 
 Claude Code gives its MCP servers `CLAUDE_CODE_SESSION_ID`; with it the session registers itself on the board's sessions strip on its first change. `KANBAN_AGENT_MODEL` and `KANBAN_STARTED_BY=hub` are set by the launcher.
 
-Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). 21 tools become available:
+Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). 23 tools become available:
 
 | Tool | Purpose |
 |---|---|
@@ -75,8 +75,36 @@ Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). 21 to
 | `session_status` | report `active` / `idle` / `waiting_input` / `finished`, the current card and a one-line note |
 | `inbox_get` | read the human's messages to this session; `wait_seconds` (≤ 60) waits for one |
 | `inbox_reply` | answer a message; the reply is threaded and shows in the card's history |
+| `report_post` | progress report, or with `final=true` the card's result (moves it to Results): `title`, Markdown `summary_md`, `assets` (figures, below) |
+| `analysis_submit` | the analyst's write-up for a card in Analysis: `analysis_md`, `agent_model` + `model_rationale`, optional `acceptance`, story fields and `subtasks` (created in Analysis as children) |
 
 While messages are unread, every tool response carries `inbox_pending` and a hint to call `inbox_get`. For delivery at turn boundaries, add the message hook (`python -m kanban_mcp.hook`) as a `Stop` and `UserPromptSubmit` hook — see the README, "Messages to agents".
+
+### Report figures (`report_post` assets)
+
+Each asset is `{"type", "caption", <one body key>, "filename"?}`; unknown keys are an error.
+
+| `type` | Body key(s) | Checked |
+|---|---|---|
+| `mermaid` | `source` (Mermaid text; a ```` ```mermaid ```` fence is unwrapped) or `path` | not empty |
+| `plotly` | `figure` (dict) or `path` to a `.json` file from `fig.write_json()` | valid JSON with a `data` list (an `.html` export is rejected) |
+| `snapshot` | `path` or `data_base64` | PNG, JPEG, GIF or WebP magic bytes (aliases: `image`, `screenshot`, `png`) |
+| `svg` | `path` or `source` | root element is `<svg>` (served as an image under a sandboxing CSP) |
+| `file` | `path` or `data_base64`, `filename` | size only; shown as a download |
+
+Relative paths resolve against `CLAUDE_PROJECT_DIR` (else the server's working directory). Limits: `KANBAN_ASSET_MAX_BYTES` (20 MB) per figure, `KANBAN_ASSETS_PER_REPORT` (24). The human can comment on the whole report or on one figure; the comment arrives through `inbox_get` with `report_id` / `asset_id` and an `about` line such as *figure "Heading error" in report "Drift study"*. A *Request changes* review arrives the same way, as `kind: "feedback"`.
+
+### Channel push (optional)
+
+With `KANBAN_MCP_CHANNEL=1` in the server's `env` (`connect … --channel` adds it), the stdio server declares the experimental `claude/channel` capability and pushes each unread human message to its session as a `notifications/claude/channel` event; Claude sees it as
+
+```text
+<channel source="agent-kanban" input_id="42" kind="comment" sender="user" task_id="T-007" report_id="3" asset_id="9" about="figure “bias” in report “Drift study”">
+Why does mission 4 still drift after the last turn?
+</channel>
+```
+
+and answers with `inbox_reply(input_id=42, …)`. Start Claude Code with `claude --dangerously-load-development-channels server:agent-kanban` (use your `.mcp.json` entry's name). Channels are a research preview: Team and Enterprise organisations must enable them, and Claude Code drops events silently when the channel isn't loaded — so a pushed message stays unread until it is answered, and the hook and `inbox_pending` still deliver it. `KANBAN_CHANNEL_FROM=any` also pushes messages from other agents; `KANBAN_CHANNEL_POLL` (s) sets how often the server looks; `KANBAN_SESSION_ID` names the session when Claude Code provides no `CLAUDE_CODE_SESSION_ID`.
 
 Mutating tools answer with a short card (`id`, `status`, `url`, …), not the whole history. Arguments are strict: `project=` instead of `project_id=` is an error that names the right parameter, not a silently dropped value. Status names are forgiving: `"In progress"`, `"Results"`, `"в работе"` and the pre-v0.3 names (`uat` → results, `analyst` → analysis) all work.
 
@@ -272,6 +300,14 @@ Key endpoints:
 | POST | `/api/tasks/{id}/comment` | comment in history (`text`, alias `comment`) |
 | POST | `/api/tasks/{id}/links` | attach link |
 | POST | `/api/tasks/{id}/blockers` | replace internal blockers |
+| POST / GET | `/api/tasks/{id}/messages` | message the card's agent (`text`, optional `report_id` / `asset_id`) / messages and the attached agent |
+| POST | `/api/tasks/{id}/analyse` | move to Analysis and fire `analysis_requested` for an analyst agent (403 over HTTP MCP) |
+| POST / GET | `/api/tasks/{id}/reports` | post a report (`title`, `summary_md`, `kind`/`final`, `assets` with `text`, `figure` or `data_base64`) / list them |
+| GET | `/api/reports/{id}` | one report with assets and comment threads |
+| POST | `/api/reports/{id}/review` | `{"decision": "accept" \| "changes", "comment": …}` (403 over HTTP MCP) |
+| GET | `/api/reports?project=&kind=result` | gallery: assets across a project's reports |
+| GET | `/api/assets/{id}` | asset body with its MIME type; `?download=true` for an attachment |
+| GET / POST | `/api/sessions` · `/api/sessions/{id}/status` · `/api/sessions/{id}/messages` · `/api/sessions/{id}/inbox` | agent sessions, heartbeats and direct messages |
 | GET | `/api/automation/status` | inbox, rules (+ running/queued commands), event feed, webhooks |
 | POST | `/api/automation/pause` | `{"paused": true}` stops every rule — a kill switch for runaway pipelines |
 
@@ -316,7 +352,9 @@ The kanban can fire HTTP notifications on changes. Config:
 ```
 
 Fields:
-- `events`: `task_created` / `task_moved` / `task_commented` / `task_updated`
+- `events`: `task_created` / `task_moved` / `task_commented` / `task_updated` /
+  `task_reported` (an agent posted a report) / `task_messaged` (a message to an agent,
+  or its reply) / `analysis_requested`
 - `format`: `slack` (`{text: "..."}`), `telegram` (`{text: "..."}`, `chat_id` in URL), `generic` (raw JSON)
 - `project_id`: limit a webhook to one project; `null` = all projects
 - `enabled`: defaults to `true`

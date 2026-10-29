@@ -65,7 +65,7 @@ Optional: `bash scripts/install_launchd.sh install` — auto-start on login.
 3. Restart Claude Code (`/mcp restart agent-kanban`).
 4. In chat: *"show me what I'm working on"* → the agent calls `kanban_my_active(assignee="claude", project_id="myproj")`.
 
-**Outcome:** the agent knows the context — it can `kanban_pull` a task from Approved, drop `kanban_comment` notes as it works, and finally `kanban_move(task_id, "results")`.
+**Outcome:** the agent knows the context — it can `kanban_pull` a task from Approved, drop `kanban_comment` notes as it works, and finally `report_post(..., final=true)` with its result and figures (→ Results).
 
 ---
 
@@ -258,7 +258,7 @@ The UI sidebar remembers the last-opened project (`localStorage.kb.lastProject`)
 1. UI, REST, an MCP agent or a script → `move_task(T-027, to_status="approved")` → a row in `task_history`.
 2. The server's event feed sees the row (within ~1 s, whoever wrote it) → the rule engine matches and starts `launch-claude.sh T-027 myproj`. A card *created* directly in Approved counts too.
 3. The launcher checks the card, the `claude` binary and the login, then runs `claude -p` in the project directory with an explicit `--mcp-config`, `--permission-mode dontAsk` and a timeout. It stays in the foreground while the agent works; the card shows a `▶ agent` chip.
-4. Through MCP, Claude calls `kanban_pull(T-027)` (approved → in_progress, assignee=claude), posts a plan via `kanban_comment`, implements, and finally `kanban_move(T-027, "results", comment="what was done, how it was verified")`.
+4. Through MCP, Claude calls `kanban_pull(T-027)` (approved → in_progress, assignee=claude), posts a plan via `kanban_comment`, implements, and finally `report_post(title=..., summary_md="what was done, how it was verified", final=true, assets=[...])`, which moves the card to Results.
 5. If the agent exits and leaves the card behind (crash, timeout, missing login), the launcher moves it to **Blocked** with the reason and the log path.
 6. In the UI you see the card in Results, you review → drag into **Done**.
 

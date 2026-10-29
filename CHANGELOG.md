@@ -30,6 +30,35 @@ mission board for you and your agents. Database schema v6 (migrates on start).
   `/api/sessions/{id}/inbox`; MCP `inbox_get` (can wait) and `inbox_reply`;
   `inbox_pending` on every MCP response; `kanban_mcp.hook` for Claude Code
   `Stop` / `UserPromptSubmit` hooks (installed by the launcher).
+- **Reports with figures**: `reports` and `report_assets` tables; MCP
+  `report_post` (progress, or `final=true` → Results) and REST
+  `/api/tasks/{id}/reports`. Figure types with their own renderers:
+  **Mermaid** (mermaid.js, strict security, themed), **Plotly** (plotly.js,
+  themed light/dark), **snapshots** (PNG/JPEG/GIF/WebP, checked by magic
+  bytes), generic **SVG** (shown as an image, served under a sandboxing CSP)
+  and downloadable **files**; ` ```mermaid ` / ` ```plotly ` fences in report
+  Markdown. Bodies stored once by SHA-256 in `KANBAN_ASSETS_DIR`.
+  `scripts/vendor_libs.sh` fetches Mermaid and Plotly.js for offline use (CDN
+  fallback otherwise).
+- **Review**: Accept (→ Done) / Request changes (note sent to the agent as
+  feedback, card back to In progress); newer results supersede older ones.
+- **Comments on reports and figures** reach the agent that posted them, with an
+  *on figure "…" in report "…"* anchor; replies thread under them.
+- **Card dialog tabs** (Overview / Reports / Activity), card thumbnails and
+  review chips, **Results gallery** (`g`) with a lightbox.
+- **Analyst agent**: *Analyse with agent* (`POST /api/tasks/{id}/analyse`),
+  MCP `analysis_submit` (analysis, worker model + reason, criteria, story,
+  sub-cards in Analysis); launcher `analyse` mode on the project's analyst model
+  with read-only tools.
+- **Resume on message**: launcher `resume` mode (`claude --resume` of the card's
+  last session).
+- **`task_event` rule trigger** (`analysis_requested`, `message`, `comment`,
+  `report`, `reply`; `agent: offline|live`; `from: human|any`) and webhook
+  events `task_reported`, `task_messaged`, `analysis_requested`.
+- **Channel push** (`KANBAN_MCP_CHANNEL=1`, `connect --channel`): messages
+  delivered into live sessions as Claude Code channel events
+  (`notifications/claude/channel`); pushed messages stay unread until
+  answered, so nothing is lost when the client drops them.
 - **Card attention states**: live outline + *writing* while an agent works on a
   card, *asks you* while it waits for input, *report* in Results, *testing*.
   Board cards carry `activity`.

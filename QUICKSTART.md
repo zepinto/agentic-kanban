@@ -62,7 +62,7 @@ The flow: you drag a card from "Backlog" to "Approved", and **Claude Code**
 1. Claims the task (`approved → in_progress`) on the card's worker model (Opus / Sonnet / Haiku, picked in Analysis or the project default),
 2. Posts a plan as a comment,
 3. Moves it to `in_progress` and implements,
-4. Moves it to `results` with a comment on what was done and how it was verified. You accept it into Done, or message the agent from the card.
+4. Posts its result with `report_post(final=true)` — what was done, how it was verified, plots and diagrams — which moves the card to `results`. On the card's **Reports** tab you **Accept** it into Done or **Request changes**, and you can comment on any figure; the agent gets every comment.
 
 All you have to do is review the result and click "Accept".
 
