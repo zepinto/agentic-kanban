@@ -34,3 +34,7 @@ logs/
 
 # launchd materialized plist (template + sed)
 ~/Library/LaunchAgents/com.agent-kanban.app.plist
+
+# report renderers fetched by scripts/vendor_libs.sh (large; loaded from a CDN when absent)
+kanban_ui/static/vendor/mermaid.min.js
+kanban_ui/static/vendor/plotly.min.js

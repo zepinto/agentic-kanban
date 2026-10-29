@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,600&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=0.3.0-mb2" />
+  <link rel="stylesheet" href="/static/styles.css?v=0.3.0-mb3" />
   <script>
     // Apply the saved light/dark scheme before body parses — no flash.
     // ?theme=light|dark is a one-off override (screenshots, shared links).
@@ -65,6 +65,7 @@
           </button>
           <button class="btn btn--icon" id="btn-theme" title="Toggle theme (t)" aria-label="Theme">◐</button>
           <button class="btn btn--icon" id="btn-density" title="Card density (d)" aria-label="Density">≡</button>
+          <button class="btn btn--icon" id="btn-gallery" title="Results gallery (g)" aria-label="Results gallery">▦</button>
           <button class="btn btn--ghost" id="btn-snapshot" title="Snapshot board → snapshots/">Snapshot</button>
           <button class="btn btn--icon" id="btn-refresh" title="Refresh (r)" aria-label="Refresh">↻</button>
           <button class="btn btn--primary" id="btn-new" title="New task (n)">+ Task</button>
@@ -98,130 +99,153 @@
   <!-- ========== Task detail modal ========== -->
   <div class="modal" id="modal" hidden>
     <div class="modal__backdrop" data-close></div>
-    <div class="modal__panel">
+    <div class="modal__panel modal__panel--wide">
       <header class="modal__head">
         <span class="task-id" id="m-id">T-???</span>
         <span class="chip chip--status" id="m-status">…</span>
         <button class="btn btn--icon" data-close aria-label="Close">×</button>
       </header>
+      <nav class="tabs" id="m-tabs" role="tablist" aria-label="Card sections">
+        <button class="tab is-active" type="button" role="tab" data-tab="overview">Overview</button>
+        <button class="tab" type="button" role="tab" data-tab="reports">Reports <span class="tab__badge" id="m-reports-count" hidden></span></button>
+        <button class="tab" type="button" role="tab" data-tab="activity">Activity</button>
+      </nav>
       <div class="modal__body">
-        <section class="message" id="m-message" hidden>
-          <div class="message__head">
-            <span class="message__title">Message the agent</span>
-            <span class="message__target" id="m-message-target"></span>
-          </div>
-          <div class="message__pending" id="m-message-pending" hidden></div>
-          <textarea id="m-message-text" rows="2" placeholder="An instruction, a correction, an answer to its question…"></textarea>
-          <div class="message__actions">
-            <span class="field__hint">Delivered the next time the agent checks in; its reply appears in the history below.</span>
-            <button class="btn btn--primary" id="btn-send-message">Send</button>
-          </div>
-        </section>
-        <div class="field">
-          <label>Title</label>
-          <input type="text" id="m-title" />
-          <span class="field__hint origin-line" id="m-origin" hidden></span>
-        </div>
-        <div class="field-row">
-          <div class="field">
-            <label>Type</label>
-            <select id="m-type">
-              <option value="task">Task</option>
-              <option value="story">User story</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Part of story</label>
-            <input type="text" id="m-parent" placeholder="— (e.g. T-012)" />
-          </div>
-          <div class="field">
-            <label>Assigned session</label>
-            <input type="text" id="m-session" readonly placeholder="—" />
-          </div>
-        </div>
-        <fieldset class="story" id="m-story" hidden>
-          <legend>User story</legend>
-          <div class="story__row"><span>As</span><input type="text" id="m-story-as" placeholder="an operator" /></div>
-          <div class="story__row"><span>I want</span><input type="text" id="m-story-want" placeholder="the gyro bias estimated online" /></div>
-          <div class="story__row"><span>so that</span><input type="text" id="m-story-so" placeholder="heading drift stays low" /></div>
-        </fieldset>
-        <div class="field-row">
-          <div class="field">
-            <label>Priority</label>
-            <select id="m-priority">
-              <option value="critical">Critical</option>
-              <option value="high">High</option>
-              <option value="normal">Normal</option>
-              <option value="low">Low</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Size</label>
-            <select id="m-size">
-              <option value="S">S — &lt;30 min</option>
-              <option value="M">M — &lt;2 h</option>
-              <option value="L">L — &gt;2 h</option>
-              <option value="XL">XL</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Assignee</label>
-            <input type="text" id="m-assignee" placeholder="— (e.g. claude, agent:reviewer)" />
-          </div>
-        </div>
-        <div class="field">
-          <label>Description</label>
-          <textarea id="m-description" rows="6"></textarea>
-        </div>
-        <div class="field">
-          <label>Acceptance criteria</label>
-          <textarea id="m-acceptance" rows="4" placeholder="- [ ] one checkable outcome per line"></textarea>
-        </div>
-        <section class="analysis" id="m-analysis-box">
-          <div class="analysis__head">
-            <span class="analysis__title">Analysis</span>
-            <span class="analysis__by" id="m-analysed-by"></span>
-          </div>
-          <textarea id="m-analysis" rows="3" placeholder="Scope, approach, risks — goes into the worker agent's brief"></textarea>
-          <div class="analysis__model">
-            <span class="analysis__label">Worker model</span>
-            <div class="model-picker" id="m-model" role="radiogroup" aria-label="Worker model">
-              <button type="button" data-model="opus" role="radio">Opus</button>
-              <button type="button" data-model="sonnet" role="radio">Sonnet</button>
-              <button type="button" data-model="haiku" role="radio">Haiku</button>
+        <div class="tab-panel" data-panel="overview">
+          <section class="message" id="m-message" hidden>
+            <div class="message__head">
+              <span class="message__title">Message the agent</span>
+              <span class="message__target" id="m-message-target"></span>
             </div>
-            <span class="analysis__hint" id="m-model-hint"></span>
+            <div class="message__pending" id="m-message-pending" hidden></div>
+            <textarea id="m-message-text" rows="2" placeholder="An instruction, a correction, an answer to its question…"></textarea>
+            <div class="message__actions">
+              <span class="field__hint">Delivered the next time the agent checks in; its reply appears in the history below.</span>
+              <button class="btn btn--primary" id="btn-send-message">Send</button>
+            </div>
+          </section>
+          <div class="field">
+            <label>Title</label>
+            <input type="text" id="m-title" />
+            <span class="field__hint origin-line" id="m-origin" hidden></span>
           </div>
-          <div class="analysis__rationale" id="m-rationale" hidden></div>
-        </section>
-        <div class="field">
-          <label>External blocker</label>
-          <input type="text" id="m-blocker" placeholder="e.g. DevOps: monitoring.viewer (empty = none)" />
-        </div>
-        <div class="field">
-          <label>Links</label>
-          <div class="links" id="m-links"></div>
-          <div class="link-add">
-            <select id="m-link-type">
-              <option value="memory">memory</option>
-              <option value="file">file</option>
-              <option value="pr">pr</option>
-              <option value="url">url</option>
-              <option value="plan">plan</option>
-            </select>
-            <input type="text" id="m-link-value" placeholder="filename or url" />
-            <button class="btn btn--ghost" id="btn-add-link">+</button>
+          <div class="field-row">
+            <div class="field">
+              <label>Type</label>
+              <select id="m-type">
+                <option value="task">Task</option>
+                <option value="story">User story</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Part of story</label>
+              <input type="text" id="m-parent" placeholder="— (e.g. T-012)" />
+            </div>
+            <div class="field">
+              <label>Assigned session</label>
+              <input type="text" id="m-session" readonly placeholder="—" />
+            </div>
+          </div>
+          <fieldset class="story" id="m-story" hidden>
+            <legend>User story</legend>
+            <div class="story__row"><span>As</span><input type="text" id="m-story-as" placeholder="an operator" /></div>
+            <div class="story__row"><span>I want</span><input type="text" id="m-story-want" placeholder="the gyro bias estimated online" /></div>
+            <div class="story__row"><span>so that</span><input type="text" id="m-story-so" placeholder="heading drift stays low" /></div>
+          </fieldset>
+          <div class="field-row">
+            <div class="field">
+              <label>Priority</label>
+              <select id="m-priority">
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="normal">Normal</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Size</label>
+              <select id="m-size">
+                <option value="S">S — &lt;30 min</option>
+                <option value="M">M — &lt;2 h</option>
+                <option value="L">L — &gt;2 h</option>
+                <option value="XL">XL</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Assignee</label>
+              <input type="text" id="m-assignee" placeholder="— (e.g. claude, agent:reviewer)" />
+            </div>
+          </div>
+          <div class="field">
+            <label>Description</label>
+            <textarea id="m-description" rows="6"></textarea>
+          </div>
+          <div class="field">
+            <label>Acceptance criteria</label>
+            <textarea id="m-acceptance" rows="4" placeholder="- [ ] one checkable outcome per line"></textarea>
+          </div>
+          <section class="analysis" id="m-analysis-box">
+            <div class="analysis__head">
+              <span class="analysis__title">Analysis</span>
+              <span class="analysis__by" id="m-analysed-by"></span>
+            </div>
+            <textarea id="m-analysis" rows="3" placeholder="Scope, approach, risks — goes into the worker agent's brief"></textarea>
+            <div class="analysis__model">
+              <span class="analysis__label">Worker model</span>
+              <div class="model-picker" id="m-model" role="radiogroup" aria-label="Worker model">
+                <button type="button" data-model="opus" role="radio">Opus</button>
+                <button type="button" data-model="sonnet" role="radio">Sonnet</button>
+                <button type="button" data-model="haiku" role="radio">Haiku</button>
+              </div>
+              <span class="analysis__hint" id="m-model-hint"></span>
+            </div>
+            <div class="analysis__rationale" id="m-rationale" hidden></div>
+          </section>
+          <div class="field">
+            <label>External blocker</label>
+            <input type="text" id="m-blocker" placeholder="e.g. DevOps: monitoring.viewer (empty = none)" />
           </div>
         </div>
-        <div class="field">
-          <label>History</label>
-          <div class="history" id="m-history"></div>
+        <div class="tab-panel" data-panel="reports" hidden>
+          <section class="review" id="m-review" hidden>
+            <div class="review__head">
+              <span class="review__title">Review the result</span>
+              <span class="review__which" id="m-review-which"></span>
+            </div>
+            <textarea id="m-review-comment" rows="2" placeholder="What should change? (needed for Request changes)"></textarea>
+            <div class="review__actions">
+              <button class="btn btn--ghost" id="btn-request-changes">Request changes</button>
+              <button class="btn btn--primary" id="btn-accept">Accept</button>
+            </div>
+          </section>
+          <div class="reports" id="m-reports"></div>
         </div>
-        <div class="field">
-          <label>Add comment</label>
-          <div class="comment-add">
-            <input type="text" id="m-comment" placeholder="Comment text" />
-            <button class="btn btn--ghost" id="btn-add-comment">+</button>
+        <div class="tab-panel" data-panel="activity" hidden>
+          <div class="field">
+            <label>Links</label>
+            <div class="links" id="m-links"></div>
+            <div class="link-add">
+              <select id="m-link-type">
+                <option value="memory">memory</option>
+                <option value="file">file</option>
+                <option value="pr">pr</option>
+                <option value="url">url</option>
+                <option value="plan">plan</option>
+              </select>
+              <input type="text" id="m-link-value" placeholder="filename or url" />
+              <button class="btn btn--ghost" id="btn-add-link">+</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>History</label>
+            <div class="history" id="m-history"></div>
+          </div>
+          <div class="field">
+            <label>Add comment</label>
+            <div class="comment-add">
+              <input type="text" id="m-comment" placeholder="Comment text" />
+              <button class="btn btn--ghost" id="btn-add-comment">+</button>
+            </div>
           </div>
         </div>
       </div>
@@ -472,9 +496,34 @@
     </div>
   </div>
 
+  <!-- ========== Results gallery ========== -->
+  <div class="modal" id="gallery-modal" hidden>
+    <div class="modal__backdrop" data-close-gallery></div>
+    <div class="modal__panel modal__panel--gallery">
+      <header class="modal__head">
+        <span class="task-id">Results gallery</span>
+        <select id="gallery-kind" aria-label="Which reports">
+          <option value="result">Results</option>
+          <option value="all">All reports</option>
+        </select>
+        <button class="btn btn--icon" data-close-gallery aria-label="Close">×</button>
+      </header>
+      <div class="modal__body">
+        <div class="gallery" id="gallery"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== Image lightbox ========== -->
+  <div class="lightbox" id="lightbox" hidden>
+    <img id="lightbox-img" alt="" />
+    <span class="lightbox__caption" id="lightbox-caption"></span>
+  </div>
+
   <div class="toast" id="toast" hidden></div>
 
   <script src="/static/vendor/Sortable.min.js"></script>
-  <script src="/static/app.js?v=0.3.0-mb2"></script>
+  <script src="/static/app.js?v=0.3.0-mb3"></script>
+  <script src="/static/reports.js?v=0.3.0-mb3"></script>
 </body>
 </html>

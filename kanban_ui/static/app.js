@@ -326,11 +326,13 @@ function cardEl(t) {
       ${t.activity === "waiting" ? `<span class="chip chip--waiting" title="The agent is waiting for your answer">asks you</span>` : ""}
       ${t.status === "results" ? `<span class="chip chip--report" title="Result report waiting for your review">report</span>` : ""}
       ${t.status === "testing" ? `<span class="chip chip--testing">testing</span>` : ""}
+      ${cardReportChip(t)}
       ${running && !t.activity ? `<span class="chip chip--running" title="Running now: ${escapeHTML(t.running.join(", "))}">▶ agent</span>` : ""}
       ${age ? `<span class="chip chip--age" title="In this column since ${escapeHTML(localTime(t.moved_at))}">${age}</span>` : ""}
       ${t.archived_at ? `<span class="chip chip--age" title="Archived ${escapeHTML(localTime(t.archived_at))}">archived</span>` : ""}
     </div>
     <div class="card__title">${escapeHTML(t.title)}</div>
+    ${cardThumbHTML(t)}
     ${(t.origin === "agent" && t.status === "backlog") || t.parent_id ? `<div class="card__sub">${
       t.origin === "agent" && t.status === "backlog"
         ? `agent idea${t.origin_task_id ? ` from ${escapeHTML(t.origin_task_id)}` : ""}` : ""}${
@@ -501,7 +503,17 @@ async function handleDrop(evt) {
 
 const HISTORY_LIMIT = 200;
 
-async function openTaskModal(taskId) {
+function selectTab(name) {
+  $$("#m-tabs .tab").forEach(b => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("is-active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  $$("#modal .tab-panel").forEach(p => { p.hidden = p.dataset.panel !== name; });
+  $("#modal .modal__body").scrollTop = 0;
+}
+
+async function openTaskModal(taskId, { tab } = {}) {
   let t;
   try {
     t = await api("GET", `/api/tasks/${encodeURIComponent(taskId)}?history_limit=${HISTORY_LIMIT}`);
@@ -552,6 +564,11 @@ async function openTaskModal(taskId) {
   $("#m-comment").value = "";
   $("#m-message-text").value = "";
   loadTaskAgent(t);
+  // Results cards open on their report; others on the overview
+  selectTab(tab || (t.status === "results" ? "reports" : "overview"));
+  loadTaskReports(t).then((reports) => {
+    if (!tab && reports && reports.length && t.status === "results") selectTab("reports");
+  });
   $("#modal").hidden = false;
   history.replaceState(history.state, "", `/p/${t.project_id}/t/${encodeURIComponent(t.id)}`);
 }
@@ -1417,6 +1434,7 @@ async function loadBoard() {
   if ($("#new-modal").hidden === false) return;
   if ($("#proj-modal").hidden === false) return;
   if ($("#msg-modal").hidden === false) return;
+  if ($("#gallery-modal").hidden === false) return;
   try {
     const qs = `project=${encodeURIComponent(state.projectId)}` +
       (state.showArchived ? "&include_archived=true" : "");
@@ -1523,6 +1541,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btn-save").addEventListener("click", saveModal);
   $("#btn-approve").addEventListener("click", () => moveModalTask("approved"));
   $("#btn-send-message").addEventListener("click", sendTaskMessage);
+  $$("#m-tabs .tab").forEach(b => b.addEventListener("click", () => selectTab(b.dataset.tab)));
+  $("#btn-accept").addEventListener("click", () => reviewPending("accept"));
+  $("#btn-request-changes").addEventListener("click", () => reviewPending("changes"));
+  $("#btn-gallery").addEventListener("click", openGallery);
+  $$("[data-close-gallery]").forEach((el) => el.addEventListener("click", closeGallery));
+  $("#gallery-kind").addEventListener("change", loadGallery);
+  $("#lightbox").addEventListener("click", closeLightbox);
   $("#m-message-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendTaskMessage();
   });
@@ -1622,6 +1647,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     const tag = (e.target.tagName || "").toLowerCase();
     const inField = tag === "input" || tag === "textarea" || tag === "select";
     if (e.key === "Escape") {
+      if (!$("#lightbox").hidden) { closeLightbox(); return; }
+      if (!$("#gallery-modal").hidden) { closeGallery(); return; }
       closeModal();
       closeNewModal();
       closeNewProj();
@@ -1644,6 +1671,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       toggleSidebar();
     } else if (e.key === "r") {
       loadBoard();
+    } else if (e.key === "g") {
+      openGallery();
     }
   });
 
