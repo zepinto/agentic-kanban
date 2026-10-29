@@ -9,14 +9,20 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 const STATUS_TITLE = {
   backlog: "Backlog",
+  analysis: "Analysis",
   approved: "Approved",
-  analyst: "Analyst",
   in_progress: "In progress",
   testing: "Testing",
-  uat: "UAT",
+  results: "Results",
   done: "Done",
   blocked: "Blocked",
   cancelled: "Cancelled",
+};
+
+const MODEL_TITLE = { opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" };
+const SESSION_STATUS_TITLE = {
+  active: "running", idle: "idle", waiting_input: "asking",
+  finished: "finished", offline: "offline",
 };
 
 const LS = {
@@ -55,10 +61,12 @@ const state = {
   showArchived: false,             // include archived cards on the board
   automationPaused: false,
   modalTask: null,                 // task currently open in the modal
+  modalModel: "",                  // worker model picked in the modal ("" = none)
+  sessions: [],                    // agent sessions of the current project
 };
 
 // Columns where "how long has it been sitting here" matters.
-const AGE_COLUMNS = new Set(["approved", "analyst", "in_progress", "testing", "uat", "blocked"]);
+const AGE_COLUMNS = new Set(["analysis", "approved", "in_progress", "testing", "results", "blocked"]);
 
 function _loadJSON(key) {
   try {
@@ -226,9 +234,10 @@ function render(board) {
     const colEl = document.createElement("section");
     colEl.className = "col";
     colEl.dataset.status = col.id;
-    if (isColEffectivelyCollapsed(col.id, list.length > 0)) {
+    if (isColEffectivelyCollapsed(col.id, list.length > 0, col.hidden)) {
       colEl.classList.add("is-collapsed");
     }
+    if (col.hint) colEl.title = col.hint;
     colEl.innerHTML = `
       <header class="col__head">
         <span class="col__chevron">▾</span>
@@ -258,13 +267,13 @@ function render(board) {
     // col head click toggles collapse
     colEl.querySelector(".col__head").addEventListener("click", (e) => {
       if (e.target.closest(".col__quickadd")) return;
-      toggleColCollapse(col.id, list.length > 0);
+      toggleColCollapse(col.id, list.length > 0, col.hidden);
     });
     colEl.querySelector(".col__quickadd").addEventListener("click", (e) => {
       e.stopPropagation();
       // If the column is collapsed — expand first, then open quickadd
       if (colEl.classList.contains("is-collapsed")) {
-        toggleColCollapse(col.id, list.length > 0);
+        toggleColCollapse(col.id, list.length > 0, col.hidden);
         setTimeout(() => openQuickAdd(col.id, colEl), 220);
       } else {
         openQuickAdd(col.id, colEl);
@@ -300,6 +309,8 @@ function cardEl(t) {
   const div = document.createElement("article");
   div.className = "card";
   if (t.priority === "high" || t.priority === "critical") div.classList.add("is-prio-high");
+  if (t.origin === "agent" && t.status === "backlog") div.classList.add("is-proposed");
+  if (t.status === "results") div.classList.add("is-review");
   if (t.archived_at) div.classList.add("is-archived");
   div.dataset.taskId = t.id;
   const running = (t.running || []).length > 0;
@@ -307,15 +318,21 @@ function cardEl(t) {
   div.innerHTML = `
     <div class="card__row">
       <span class="card__id">${t.id}</span>
+      ${t.type === "story" ? `<span class="chip chip--story" title="User story">STORY</span>` : ""}
       ${t.priority === "critical" ? `<span class="chip chip--prio-high">CRIT</span>` : ""}
       ${t.priority === "high" ? `<span class="chip chip--prio-high">HIGH</span>` : ""}
       <span class="chip chip--size-${escapeHTML(t.size)}">${escapeHTML(t.size)}</span>
+      ${t.agent_model ? `<span class="chip chip--model chip--model-${escapeHTML(t.agent_model)}" title="Worker model">${escapeHTML(MODEL_TITLE[t.agent_model] || t.agent_model)}</span>` : ""}
       ${t.assignee ? `<span class="chip chip--assignee">${escapeHTML(t.assignee)}</span>` : ""}
       ${running ? `<span class="chip chip--running" title="Running now: ${escapeHTML(t.running.join(", "))}">▶ agent</span>` : ""}
       ${age ? `<span class="chip chip--age" title="In this column since ${escapeHTML(localTime(t.moved_at))}">${age}</span>` : ""}
       ${t.archived_at ? `<span class="chip chip--age" title="Archived ${escapeHTML(localTime(t.archived_at))}">archived</span>` : ""}
     </div>
     <div class="card__title">${escapeHTML(t.title)}</div>
+    ${(t.origin === "agent" && t.status === "backlog") || t.parent_id ? `<div class="card__sub">${
+      t.origin === "agent" && t.status === "backlog"
+        ? `agent idea${t.origin_task_id ? ` from ${escapeHTML(t.origin_task_id)}` : ""}` : ""}${
+      t.parent_id ? `${t.origin === "agent" && t.status === "backlog" ? " · " : ""}part of ${escapeHTML(t.parent_id)}` : ""}</div>` : ""}
     ${t.external_blocker ? `<div class="card__meta"><span class="card__blocker" title="${escapeHTML(t.external_blocker)}">${escapeHTML(t.external_blocker)}</span></div>` : ""}
   `;
   div.addEventListener("click", () => {
@@ -339,6 +356,7 @@ function matchesFilters(t) {
     if (f === "prio:high" && t.priority !== "high") return false;
     if (f === "blocked" && !t.external_blocker) return false;
     if (f === "unassigned" && t.assignee) return false;
+    if (f === "proposed" && t.origin !== "agent") return false;
     if (f.startsWith("assignee:")) {
       const want = f.slice("assignee:".length);
       const have = t.assignee || "";
@@ -380,20 +398,21 @@ function applyFilters() {
 // This auto-collapses empty columns but still respects an explicit user choice
 // (click on the header).
 
-function isColEffectivelyCollapsed(colId, hasTasks) {
+function isColEffectivelyCollapsed(colId, hasTasks, hidden = false) {
   const proj = state.projectId;
   const manualC = (state.collapsedCols[proj] || []).includes(colId);
   if (manualC) return true;
   const manualE = (state.expandedCols[proj] || []).includes(colId);
   if (manualE) return false;
-  return !hasTasks;
+  // optional columns (Testing) stay folded away until opened by hand
+  return hidden || !hasTasks;
 }
 
-function toggleColCollapse(colId, hasTasks) {
+function toggleColCollapse(colId, hasTasks, hidden = false) {
   const proj = state.projectId;
   const collapsedList = state.collapsedCols[proj] || [];
   const expandedList = state.expandedCols[proj] || [];
-  const wasCollapsed = isColEffectivelyCollapsed(colId, hasTasks);
+  const wasCollapsed = isColEffectivelyCollapsed(colId, hasTasks, hidden);
 
   // remove colId from both lists (for cleanliness)
   const cIdx = collapsedList.indexOf(colId);
@@ -500,12 +519,96 @@ async function openTaskModal(taskId) {
   $("#m-description").value = t.description || "";
   $("#m-acceptance").value = t.acceptance || "";
   $("#m-blocker").value = t.external_blocker || "";
+  $("#m-type").value = t.type || "task";
+  $("#m-parent").value = t.parent_id || "";
+  $("#m-session").value = t.assigned_session_id || "";
+  $("#m-story-as").value = t.story_as_a || "";
+  $("#m-story-want").value = t.story_i_want || "";
+  $("#m-story-so").value = t.story_so_that || "";
+  syncStoryVisibility("m");
+  const origin = $("#m-origin");
+  if (t.origin === "agent") {
+    origin.hidden = false;
+    origin.textContent = "Proposed by an agent" +
+      (t.origin_task_id ? ` while working on ${t.origin_task_id}` : "") +
+      (t.origin_session_id ? ` (session ${t.origin_session_id})` : "");
+  } else {
+    origin.hidden = true;
+  }
+  $("#m-analysis").value = t.analysis_md || "";
+  $("#m-analysed-by").textContent = t.analysed_by ? `by ${t.analysed_by}` : "";
+  const rat = $("#m-rationale");
+  rat.hidden = !t.model_rationale;
+  rat.textContent = t.model_rationale ? `Why this model: ${t.model_rationale}` : "";
+  setModalModel(t.agent_model || "");
+  const canApprove = t.status === "backlog" || t.status === "analysis";
+  $("#btn-approve").hidden = !canApprove;
+  $("#btn-to-analysis").hidden = t.status !== "backlog";
   $("#btn-archive-task").textContent = t.archived_at ? "Unarchive" : "Archive";
   renderLinks(t.links);
   renderHistory(t.history, t.history_total);
   $("#m-comment").value = "";
   $("#modal").hidden = false;
   history.replaceState(history.state, "", `/p/${t.project_id}/t/${encodeURIComponent(t.id)}`);
+}
+
+// ----------------------------------------------------------- Story + model helpers
+
+function syncStoryVisibility(prefix) {
+  $(`#${prefix}-story`).hidden = $(`#${prefix}-type`).value !== "story";
+}
+
+function projectDefaultModel() {
+  return (state.project && state.project.default_model) || "sonnet";
+}
+
+function setModalModel(model) {
+  state.modalModel = model || "";
+  $$("#m-model button").forEach(b => {
+    const on = b.dataset.model === state.modalModel;
+    b.classList.toggle("is-active", on);
+    b.setAttribute("aria-checked", on ? "true" : "false");
+  });
+  const eff = state.modalModel || projectDefaultModel();
+  $("#m-model-hint").textContent = state.modalModel
+    ? "" : `none picked — approval uses the project default (${MODEL_TITLE[eff] || eff})`;
+  $("#btn-approve").textContent = `Approve with ${MODEL_TITLE[eff] || eff}`;
+}
+
+function modalPayload() {
+  return {
+    title: $("#m-title").value.trim(),
+    description: $("#m-description").value,
+    acceptance: $("#m-acceptance").value,
+    priority: $("#m-priority").value,
+    size: $("#m-size").value,
+    // "" clears the blocker / parent (null would mean "leave unchanged")
+    external_blocker: $("#m-blocker").value.trim(),
+    type: $("#m-type").value,
+    parent_id: $("#m-parent").value.trim(),
+    story_as_a: $("#m-story-as").value,
+    story_i_want: $("#m-story-want").value,
+    story_so_that: $("#m-story-so").value,
+    agent_model: state.modalModel,
+    ...(($("#m-analysis").value !== ((state.modalTask && state.modalTask.analysis_md) || ""))
+      ? { analysis_md: $("#m-analysis").value } : {}),
+  };
+}
+
+async function moveModalTask(toStatus) {
+  const taskId = $("#modal").dataset.taskId;
+  if (!taskId) return;
+  try {
+    await api("PATCH", `/api/tasks/${taskId}`, modalPayload());
+    const t = await api("POST", `/api/tasks/${taskId}/move`, { to_status: toStatus });
+    const model = t.agent_model ? ` · ${MODEL_TITLE[t.agent_model] || t.agent_model}` : "";
+    toast(`${taskId} → ${STATUS_TITLE[toStatus] || toStatus}${toStatus === "approved" ? model : ""}`);
+    closeModal();
+    await loadBoard();
+    await loadProjects();
+  } catch (e) {
+    toast(`Error: ${e.message}`, "err");
+  }
 }
 
 async function copyTaskLink() {
@@ -590,15 +693,7 @@ function closeModal() {
 async function saveModal() {
   const taskId = $("#modal").dataset.taskId;
   if (!taskId) return;
-  const payload = {
-    title: $("#m-title").value.trim(),
-    description: $("#m-description").value,
-    acceptance: $("#m-acceptance").value,
-    priority: $("#m-priority").value,
-    size: $("#m-size").value,
-    // "" clears the blocker (null would mean "leave unchanged")
-    external_blocker: $("#m-blocker").value.trim(),
-  };
+  const payload = modalPayload();
   const assignee = $("#m-assignee").value.trim();
   try {
     await api("PATCH", `/api/tasks/${taskId}`, payload);
@@ -653,6 +748,14 @@ function openNewModal() {
   $("#n-priority").value = "normal";
   $("#n-size").value = "M";
   $("#n-status").value = "backlog";
+  $("#n-type").value = "task";
+  $("#n-model").value = "";
+  $("#n-parent").value = "";
+  $("#n-story-as").value = "";
+  $("#n-story-want").value = "";
+  $("#n-story-so").value = "";
+  syncStoryVisibility("n");
+  $("#n-model").options[0].textContent = `Project default (${MODEL_TITLE[projectDefaultModel()]})`;
   $("#n-proj-chip").textContent = state.project ? state.project.name : state.projectId;
   $("#new-modal").hidden = false;
   $("#n-title").focus();
@@ -676,7 +779,13 @@ async function createTask() {
     size: $("#n-size").value,
     status: $("#n-status").value,
     project_id: state.projectId,
+    type: $("#n-type").value,
+    story_as_a: $("#n-story-as").value,
+    story_i_want: $("#n-story-want").value,
+    story_so_that: $("#n-story-so").value,
   };
+  if ($("#n-model").value) payload.agent_model = $("#n-model").value;
+  if ($("#n-parent").value.trim()) payload.parent_id = $("#n-parent").value.trim();
   try {
     const t = await api("POST", `/api/tasks`, payload);
     toast(`${t.id} created`);
@@ -851,6 +960,8 @@ function openNewProj() {
   $("#p-id").value = "";
   $("#p-id").disabled = false;
   $("#p-path").value = "";
+  $("#p-default-model").value = "sonnet";
+  $("#p-analyst-model").value = "sonnet";
   $$(".swatch").forEach(s => s.classList.toggle("is-active", s.dataset.color === "#F10D30"));
   resetSourceWizard();
   $("#p-connect").checked = true;    // new project: offer .mcp.json by default
@@ -866,6 +977,8 @@ function openEditProj(p) {
   $("#p-id").value = p.id;
   $("#p-id").disabled = true;     // id is immutable (FK on tasks)
   $("#p-path").value = p.path || "";
+  $("#p-default-model").value = p.default_model || "sonnet";
+  $("#p-analyst-model").value = p.analyst_model || "sonnet";
   $$(".swatch").forEach(s => s.classList.toggle("is-active", s.dataset.color === p.color));
   resetSourceWizard();
   showCurrentSource(p.id);
@@ -890,6 +1003,8 @@ async function saveProj() {
   // The icon is auto-generated from the first letter of the name; the
   // backend does the same when icon is empty (see Store.create_project).
   const icon = "";
+  const default_model = $("#p-default-model").value;
+  const analyst_model = $("#p-analyst-model").value;
   if (!name) { toast("Name is required", "err"); return; }
 
   // Pre-validation: types new/local require a path. Otherwise the wizard does
@@ -920,7 +1035,8 @@ async function saveProj() {
   let savedId = editingProjId;
   if (editingProjId) {
     try {
-      await api("PATCH", `/api/projects/${editingProjId}`, { name, color, icon, path });
+      await api("PATCH", `/api/projects/${editingProjId}`,
+                { name, color, icon, path, default_model, analyst_model });
     } catch (e) {
       toast(`Error: ${e.message}`, "err");
       return;
@@ -932,7 +1048,8 @@ async function saveProj() {
       return;
     }
     try {
-      await api("POST", "/api/projects", { id, name, color, icon, path });
+      await api("POST", "/api/projects",
+                { id, name, color, icon, path, default_model, analyst_model });
       savedId = id;
     } catch (e) {
       toast(`Error: ${e.message}`, "err");
@@ -1160,6 +1277,53 @@ async function toggleAutomation() {
   await refreshAutomation();
 }
 
+// ----------------------------------------------------------- Sessions strip
+
+async function loadSessions() {
+  if (!state.projectId) return;
+  try {
+    const r = await api("GET", `/api/sessions?project=${encodeURIComponent(state.projectId)}`);
+    state.sessions = r.sessions || [];
+  } catch {
+    state.sessions = [];
+  }
+  renderSessions();
+}
+
+function renderSessions() {
+  const box = $("#sessions");
+  const list = $("#sessions-list");
+  const sessions = state.sessions || [];
+  box.hidden = sessions.length === 0;
+  list.innerHTML = "";
+  for (const s of sessions) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = `session session--${s.status}`;
+    const model = s.model ? ` · ${MODEL_TITLE[s.model] || s.model}` : "";
+    const status = SESSION_STATUS_TITLE[s.status] || s.status;
+    chip.title = [
+      `${s.agent_name} on ${s.machine || "?"}${s.repo ? ` — ${s.repo}` : ""}`,
+      s.current_task_id ? `card ${s.current_task_id}` : "no card",
+      s.note ? `“${s.note}”` : "",
+      `last heard ${localTime(s.last_heartbeat)}`,
+      s.started_by === "hub" ? "started by the board" : "started by hand",
+    ].filter(Boolean).join("\n");
+    chip.innerHTML = `
+      <span class="session__dot"></span>
+      <span class="session__name">${escapeHTML(s.agent_name)}</span>
+      <span class="session__meta">${escapeHTML(model)} · ${escapeHTML(status)}</span>
+      ${s.current_task_id ? `<span class="session__task">${escapeHTML(s.current_task_id)}</span>` : ""}
+    `;
+    if (s.current_task_id) {
+      chip.addEventListener("click", () => openTaskModal(s.current_task_id));
+    } else {
+      chip.disabled = true;
+    }
+    list.appendChild(chip);
+  }
+}
+
 async function loadProjects() {
   try {
     const r = await api("GET", "/api/projects?include_archived=true");
@@ -1181,6 +1345,7 @@ async function loadBoard() {
       (state.showArchived ? "&include_archived=true" : "");
     const board = await api("GET", `/api/board?${qs}`);
     render(board);
+    loadSessions();
   } catch (e) {
     if (String(e.message).includes("HTTP 404")) {
       // Project not found — fall back to the first available
@@ -1279,6 +1444,12 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Buttons
   $("#btn-save").addEventListener("click", saveModal);
+  $("#btn-approve").addEventListener("click", () => moveModalTask("approved"));
+  $("#btn-to-analysis").addEventListener("click", () => moveModalTask("analysis"));
+  $$("#m-model button").forEach(b => b.addEventListener("click", () =>
+    setModalModel(state.modalModel === b.dataset.model ? "" : b.dataset.model)));
+  $("#m-type").addEventListener("change", () => syncStoryVisibility("m"));
+  $("#n-type").addEventListener("change", () => syncStoryVisibility("n"));
   $("#btn-add-link").addEventListener("click", addLink);
   $("#btn-add-comment").addEventListener("click", addComment);
   $("#btn-new").addEventListener("click", openNewModal);

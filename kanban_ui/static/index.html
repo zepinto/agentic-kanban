@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=Cinzel:wght@500;600;700&family=Marcellus&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=0.2.0" />
+  <link rel="stylesheet" href="/static/styles.css?v=0.3.0-mb1" />
   <script>
     // Apply saved theme and profile before body parses — no flash of wrong styles.
     // Also accept ?theme=light|dark and ?profile=standard|cyberpunk|horizon
@@ -71,6 +71,7 @@
           <button class="filter-chip" data-filter="blocked" title="With blocker only">Blocker</button>
           <button class="filter-chip" data-filter="assignee:agent" title="Agents only">Agents</button>
           <button class="filter-chip" data-filter="unassigned" title="No assignee">Unassigned</button>
+          <button class="filter-chip" data-filter="proposed" title="Proposed by an agent">Proposals</button>
         </div>
         <div class="topbar__actions">
           <button class="btn btn--icon automation-toggle" id="btn-automation" title="Pause automation (rules, agent launches)" aria-label="Automation">⏸</button>
@@ -90,6 +91,10 @@
         Automation is paused — rules don't act and no agents are launched.
         <button class="btn btn--ghost" id="btn-resume-automation">Resume</button>
       </div>
+      <section class="sessions" id="sessions" hidden aria-label="Agent sessions">
+        <span class="sessions__label">Sessions</span>
+        <div class="sessions__list" id="sessions-list"></div>
+      </section>
       <main class="board" id="board">
         <!-- columns rendered by app.js -->
       </main>
@@ -110,7 +115,31 @@
         <div class="field">
           <label>Title</label>
           <input type="text" id="m-title" />
+          <span class="field__hint origin-line" id="m-origin" hidden></span>
         </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Type</label>
+            <select id="m-type">
+              <option value="task">Task</option>
+              <option value="story">User story</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Part of story</label>
+            <input type="text" id="m-parent" placeholder="— (e.g. T-012)" />
+          </div>
+          <div class="field">
+            <label>Assigned session</label>
+            <input type="text" id="m-session" readonly placeholder="—" />
+          </div>
+        </div>
+        <fieldset class="story" id="m-story" hidden>
+          <legend>User story</legend>
+          <div class="story__row"><span>As</span><input type="text" id="m-story-as" placeholder="an operator" /></div>
+          <div class="story__row"><span>I want</span><input type="text" id="m-story-want" placeholder="the gyro bias estimated online" /></div>
+          <div class="story__row"><span>so that</span><input type="text" id="m-story-so" placeholder="heading drift stays low" /></div>
+        </fieldset>
         <div class="field-row">
           <div class="field">
             <label>Priority</label>
@@ -141,8 +170,25 @@
         </div>
         <div class="field">
           <label>Acceptance criteria</label>
-          <textarea id="m-acceptance" rows="4"></textarea>
+          <textarea id="m-acceptance" rows="4" placeholder="- [ ] one checkable outcome per line"></textarea>
         </div>
+        <section class="analysis" id="m-analysis-box">
+          <div class="analysis__head">
+            <span class="analysis__title">Analysis</span>
+            <span class="analysis__by" id="m-analysed-by"></span>
+          </div>
+          <textarea id="m-analysis" rows="3" placeholder="Scope, approach, risks — goes into the worker agent's brief"></textarea>
+          <div class="analysis__model">
+            <span class="analysis__label">Worker model</span>
+            <div class="model-picker" id="m-model" role="radiogroup" aria-label="Worker model">
+              <button type="button" data-model="opus" role="radio">Opus</button>
+              <button type="button" data-model="sonnet" role="radio">Sonnet</button>
+              <button type="button" data-model="haiku" role="radio">Haiku</button>
+            </div>
+            <span class="analysis__hint" id="m-model-hint"></span>
+          </div>
+          <div class="analysis__rationale" id="m-rationale" hidden></div>
+        </section>
         <div class="field">
           <label>External blocker</label>
           <input type="text" id="m-blocker" placeholder="e.g. DevOps: monitoring.viewer (empty = none)" />
@@ -177,6 +223,8 @@
       <footer class="modal__foot">
         <button class="btn btn--ghost modal__foot-left" id="btn-archive-task" title="Hide from the board, keep the status">Archive</button>
         <button class="btn btn--ghost" data-close>Cancel</button>
+        <button class="btn btn--ghost" id="btn-to-analysis" hidden title="Move to Analysis to refine it">To Analysis</button>
+        <button class="btn btn--ghost btn--approve" id="btn-approve" hidden title="Save and approve: an agent on this model takes it">Approve</button>
         <button class="btn btn--primary" id="btn-save">Save</button>
       </footer>
     </div>
@@ -201,6 +249,7 @@
             <label>Column</label>
             <select id="n-status">
               <option value="backlog">Backlog</option>
+              <option value="analysis">Analysis</option>
               <option value="approved">Approved</option>
               <option value="blocked">Blocked</option>
             </select>
@@ -224,13 +273,41 @@
             </select>
           </div>
         </div>
+        <div class="field-row">
+          <div class="field">
+            <label>Type</label>
+            <select id="n-type">
+              <option value="task">Task</option>
+              <option value="story">User story</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Worker model</label>
+            <select id="n-model">
+              <option value="">Project default</option>
+              <option value="opus">Opus</option>
+              <option value="sonnet">Sonnet</option>
+              <option value="haiku">Haiku</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Part of story</label>
+            <input type="text" id="n-parent" placeholder="— (e.g. T-012)" />
+          </div>
+        </div>
+        <fieldset class="story" id="n-story" hidden>
+          <legend>User story</legend>
+          <div class="story__row"><span>As</span><input type="text" id="n-story-as" placeholder="an operator" /></div>
+          <div class="story__row"><span>I want</span><input type="text" id="n-story-want" placeholder="the gyro bias estimated online" /></div>
+          <div class="story__row"><span>so that</span><input type="text" id="n-story-so" placeholder="heading drift stays low" /></div>
+        </fieldset>
         <div class="field">
           <label>Description</label>
           <textarea id="n-description" rows="5"></textarea>
         </div>
         <div class="field">
           <label>Acceptance criteria</label>
-          <textarea id="n-acceptance" rows="3"></textarea>
+          <textarea id="n-acceptance" rows="3" placeholder="- [ ] one checkable outcome per line"></textarea>
         </div>
       </div>
       <footer class="modal__foot">
@@ -265,6 +342,24 @@
             <button class="btn btn--ghost" type="button" data-action="pick-folder" id="btn-pick-folder" title="Pick in Finder">Choose…</button>
           </div>
           <span class="field__hint">Optional. Path to the Claude Code project on disk.</span>
+        </div>
+        <div class="field-row field-row--2">
+          <div class="field">
+            <label>Default worker model</label>
+            <select id="p-default-model">
+              <option value="sonnet">Sonnet</option>
+              <option value="opus">Opus</option>
+              <option value="haiku">Haiku</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Analyst agent model</label>
+            <select id="p-analyst-model">
+              <option value="sonnet">Sonnet</option>
+              <option value="opus">Opus</option>
+              <option value="haiku">Haiku</option>
+            </select>
+          </div>
         </div>
         <div class="field">
           <label>Color</label>
@@ -351,6 +446,6 @@
   <div class="toast" id="toast" hidden></div>
 
   <script src="/static/vendor/Sortable.min.js"></script>
-  <script src="/static/app.js?v=0.2.0"></script>
+  <script src="/static/app.js?v=0.3.0-mb1"></script>
 </body>
 </html>
