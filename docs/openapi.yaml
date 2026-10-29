@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Kanban
-  version: 0.2.0
+  version: 0.3.0
 paths:
   /:
     get:
@@ -905,6 +905,260 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/sessions:
+    get:
+      summary: List Sessions
+      description: 'Agent sessions for the sessions strip, most recently heard from
+        first.
+
+        Silent sessions show as ``offline``; those silent for over a day are
+
+        left out.'
+      operationId: list_sessions_api_sessions_get
+      parameters:
+      - name: project
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: project slug; omit for all projects
+          title: Project
+        description: project slug; omit for all projects
+      - name: include_finished
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: also list finished sessions
+          default: false
+          title: Include Finished
+        description: also list finished sessions
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Sessions Api Sessions Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      summary: Register Session
+      description: 'Register (or refresh) an agent session — for launchers and hooks;
+
+        sessions using the stdio MCP server register themselves.'
+      operationId: register_session_api_sessions_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionRegister'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Register Session Api Sessions Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/sessions/{session_id}/status:
+    post:
+      summary: Session Status
+      description: Heartbeat; optionally a new status, current card or note.
+      operationId: session_status_api_sessions__session_id__status_post
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionStatus'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Session Status Api Sessions  Session Id  Status Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/tasks/{task_id}/messages:
+    post:
+      summary: Message Task
+      description: 'Message the agent on a card: the agent working on it, else the
+        one
+
+        that proposed it; with none attached yet the message waits for whoever
+
+        claims the card. It is also written to the card''s history.'
+      operationId: message_task_api_tasks__task_id__messages_post
+      parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Task Id
+      - name: x-kanban-actor
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Kanban-Actor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Message Task Api Tasks  Task Id  Messages Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      summary: Task Messages
+      operationId: task_messages_api_tasks__task_id__messages_get
+      parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Task Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Task Messages Api Tasks  Task Id  Messages Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/sessions/{session_id}/messages:
+    post:
+      summary: Message Session
+      description: Message an agent session directly (optionally about a card).
+      operationId: message_session_api_sessions__session_id__messages_post
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: x-kanban-actor
+        in: header
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: X-Kanban-Actor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageRequest'
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Message Session Api Sessions  Session Id  Messages
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/sessions/{session_id}/inbox:
+    get:
+      summary: Session Inbox
+      description: Unread messages for a session — what the Claude Code hooks deliver.
+      operationId: session_inbox_api_sessions__session_id__inbox_get
+      parameters:
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Session Id
+      - name: mark_delivered
+        in: query
+        required: false
+        schema:
+          type: boolean
+          description: mark returned messages as read
+          default: true
+          title: Mark Delivered
+        description: mark returned messages as read
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Session Inbox Api Sessions  Session Id  Inbox Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/snapshot:
     post:
       summary: Snapshot
@@ -1143,6 +1397,33 @@ components:
       - type
       - value
       title: LinkRequest
+    MessageRequest:
+      properties:
+        text:
+          type: string
+          title: Text
+        kind:
+          type: string
+          title: Kind
+          description: instruction / comment / feedback / answer / stop
+          default: instruction
+        task_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Task Id
+          description: card the message is about (session messages)
+        parent_id:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Parent Id
+          description: message this one answers
+      additionalProperties: false
+      type: object
+      required:
+      - text
+      title: MessageRequest
     MoveRequest:
       properties:
         to_status:
@@ -1198,7 +1479,7 @@ components:
         color:
           type: string
           title: Color
-          default: '#F10D30'
+          default: '#0061A4'
         icon:
           type: string
           title: Icon
@@ -1213,6 +1494,18 @@ components:
           - type: string
           - type: 'null'
           title: Path
+        default_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Default Model
+          description: worker model a card starts with
+        analyst_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Analyst Model
+          description: model the analyst agent runs on
       type: object
       required:
       - id
@@ -1245,8 +1538,84 @@ components:
           - type: string
           - type: 'null'
           title: Path
+        default_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Default Model
+        analyst_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Analyst Model
       type: object
       title: ProjectUpdate
+    SessionRegister:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: Claude Code session id
+        agent_name:
+          type: string
+          title: Agent Name
+        machine:
+          type: string
+          title: Machine
+          default: ''
+        repo:
+          type: string
+          title: Repo
+          default: ''
+        project_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Project Id
+        model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model
+          description: one of opus, sonnet, haiku
+        started_by:
+          type: string
+          title: Started By
+          description: hub (started by the board) or manual
+          default: manual
+        current_task_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Current Task Id
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - agent_name
+      title: SessionRegister
+    SessionStatus:
+      properties:
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+          description: one of active, idle, waiting_input, finished
+        task_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Task Id
+          description: current card; "" clears it
+        note:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Note
+      additionalProperties: false
+      type: object
+      title: SessionStatus
     SourceGitRequest:
       properties:
         repo_url:
@@ -1333,6 +1702,45 @@ components:
           type: string
           title: Project Id
           default: default
+        type:
+          type: string
+          title: Type
+          description: one of task, story
+          default: task
+        story_as_a:
+          type: string
+          title: Story As A
+          default: ''
+        story_i_want:
+          type: string
+          title: Story I Want
+          default: ''
+        story_so_that:
+          type: string
+          title: Story So That
+          default: ''
+        parent_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Id
+          description: the story this task belongs to
+        origin_task_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Origin Task Id
+          description: card the author was working on when this came up
+        agent_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Model
+          description: one of opus, sonnet, haiku
+        analysis_md:
+          type: string
+          title: Analysis Md
+          default: ''
       additionalProperties: false
       type: object
       required:
@@ -1371,6 +1779,50 @@ components:
           - type: 'null'
           title: External Blocker
           description: '"" clears the external blocker; null leaves it unchanged'
+        type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Type
+          description: one of task, story
+        story_as_a:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Story As A
+        story_i_want:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Story I Want
+        story_so_that:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Story So That
+        parent_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Id
+          description: '"" clears it'
+        agent_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Agent Model
+          description: 'worker model: opus, sonnet, haiku; "" clears it'
+        analysis_md:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Analysis Md
+          description: analysis notes for the agent's brief
+        model_rationale:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model Rationale
       additionalProperties: false
       type: object
       title: TaskUpdate
@@ -1400,4 +1852,3 @@ components:
       - msg
       - type
       title: ValidationError
-
