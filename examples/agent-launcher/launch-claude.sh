@@ -209,11 +209,23 @@ json.dump({"mcpServers": {"agent-kanban": {
 }}}, open(out, "w"), indent=2)
 PYEOF
 
+# Stop hook: messages you send to this card's agent from the board are handed
+# to it whenever it tries to finish, so it reads them instead of exiting.
+SETTINGS="$RUN_DIR/settings.json"
+"$PY" - "$SETTINGS" "$KANBAN_ROOT" "$DB_PATH" "$PY" <<'PYEOF'
+import json, shlex, sys
+out, root, db, py = sys.argv[1:5]
+cmd = (f"KANBAN_DB={shlex.quote(db)} PYTHONPATH={shlex.quote(root)} "
+       f"{shlex.quote(py)} -m kanban_mcp.hook")
+json.dump({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": cmd}]}]}},
+          open(out, "w"), indent=2)
+PYEOF
+
 KANBAN_TOOLS=""
 for t in columns get history pull move comment link create update search my_active board blockers; do
     KANBAN_TOOLS="$KANBAN_TOOLS mcp__${MCP_ALIAS}__kanban_$t"
 done
-for t in task_propose session_register session_status; do
+for t in task_propose session_register session_status inbox_get inbox_reply; do
     KANBAN_TOOLS="$KANBAN_TOOLS mcp__${MCP_ALIAS}__$t"
 done
 ALLOWED="${KANBAN_ALLOWED_TOOLS:-Bash Read Edit Write Grep Glob TodoWrite}$KANBAN_TOOLS"
@@ -249,6 +261,10 @@ Workflow:
 
 Found follow-up work outside this card's scope? Do not do it: record it with
 task_propose (it lands in the backlog for the human to approve).
+The human can message you from the board. When a tool response shows
+"inbox_pending", call inbox_get, act on the messages, and answer each with
+inbox_reply. To ask the human something, kanban_comment the question,
+session_status(status="waiting_input"), then inbox_get(wait_seconds=60).
 If the task is ambiguous or you are blocked, add a kanban_comment with the
 specific question and kanban_move the card to "blocked". Do not guess.
 Change only what the card asks for.
@@ -272,7 +288,7 @@ EOF
 # --- 4. run the agent with a hard timeout -----------------------------------
 
 CMD=("$CLAUDE" -p "$(cat "$PROMPT")" --output-format json
-     --mcp-config "$MCP_CONFIG" --permission-mode "$PERMISSION_MODE"
+     --mcp-config "$MCP_CONFIG" --settings "$SETTINGS" --permission-mode "$PERMISSION_MODE"
      --allowedTools $ALLOWED)
 [[ "$STRICT_MCP" == "1" ]] && CMD+=(--strict-mcp-config)
 [[ -n "$MODEL" ]] && CMD+=(--model "$MODEL")

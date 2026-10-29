@@ -44,11 +44,13 @@ log = logging.getLogger("kanban.plan_md")
 HEADING_TO_STATUS: dict[str, str] = {
     "backlog": "backlog", "бэклог": "backlog",
     "approved": "approved", "согласовано": "approved",
-    "analyst": "analyst", "analytics": "analyst", "аналитика": "analyst",
+    "analysis": "analysis", "analyst": "analysis", "analytics": "analysis",
+    "аналитика": "analysis", "refinement": "analysis",
     "in progress": "in_progress", "wip": "in_progress",
     "in_progress": "in_progress", "в работе": "in_progress",
     "testing": "testing", "qa": "testing", "тестирование": "testing",
-    "uat": "uat", "acceptance": "uat", "приёмка": "uat", "приемка": "uat",
+    "results": "results", "review": "results", "uat": "results",
+    "acceptance": "results", "приёмка": "results", "приемка": "results",
     "done": "done", "closed": "done", "закрыто": "done",
     "blocked": "blocked", "заблокировано": "blocked",
     "cancelled": "cancelled", "canceled": "cancelled", "отменено": "cancelled",
@@ -56,11 +58,11 @@ HEADING_TO_STATUS: dict[str, str] = {
 
 STATUS_LABELS_RU = {
     "backlog":     "Backlog",
+    "analysis":    "Analysis",
     "approved":    "Approved",
-    "analyst":     "Analyst",
     "in_progress": "In progress",
     "testing":     "Testing",
-    "uat":         "UAT",
+    "results":     "Results",
     "done":        "Done",
     "blocked":     "Blocked",
     "cancelled":   "Cancelled",
@@ -164,8 +166,8 @@ def render_plan_template(project_name: str, project_id: str) -> str:
         f"> Every `- [ ] ...` line under a column heading becomes a card in "
         f"that column. Later edits here do not reach the board — create "
         f"cards in the UI or with `kanban_create`.\n"
-        f"> Allowed column headings: Backlog, Approved, Analyst, "
-        f"In progress, Testing, UAT, Done, Blocked, Cancelled (Russian also OK).\n\n"
+        f"> Allowed column headings: Backlog, Analysis, Approved, "
+        f"In progress, Testing, Results, Done, Blocked, Cancelled (Russian also OK).\n\n"
         f"## Backlog\n\n"
         f"<!-- one card per line: - [ ] Title -->\n\n"
         f"## In progress\n\n"
@@ -185,23 +187,28 @@ Board: {board_url}/p/{project_id} · MCP server `{alias}` (tools
 
 ### Agent workflow rules (strict)
 
+Columns: Backlog → Analysis → Approved → In progress → Results → Done
+(plus Blocked / Cancelled). Analysis, Approved and Done belong to the human.
+
 When you take a task from the kanban:
 
-1. **Before editing any files** — `kanban_move(task_id, "in_progress")`.
-   The human needs to see that work has actually started, not just been
-   announced in chat.
+1. **Before editing any files** — claim it: `kanban_pull(task_id)` for an
+   approved card (it moves to `in_progress`), or `kanban_move(task_id,
+   "in_progress")`. The human needs to see that work has actually started,
+   not just been announced in chat.
 2. **As you work** — `kanban_comment(task_id, ...)` with the plan,
    blockers, decisions. These land in the task history and show up in
-   the UI.
-3. **When implementation is complete** — `kanban_move(task_id, "testing",
+   the UI. `session_status(note=...)` updates your chip on the board.
+3. **When implementation is complete** — `kanban_move(task_id, "results",
    comment="what was done and how it was verified")`. **Never move a task
-   to `done` yourself** — `done` is the human's call after review (the
-   MCP server refuses it by default).
-4. If you get stuck — `kanban_move(task_id, "blocked", comment="what
-   exactly blocks")`.
-5. New work you discover — `kanban_create(title, description,
-   acceptance)`; it lands in this project's Backlog. Do not keep a
-   parallel task list in markdown files: the board does not read them.
+   to `done` or `approved` yourself** — those are the human's calls (the
+   MCP server refuses them by default).
+4. If you get stuck — `kanban_move(task_id, "blocked", comment="the
+   specific question")` and `session_status(status="waiting_input")`.
+5. New work you discover — `task_propose(title, description, acceptance)`
+   (or `type="story"` with `story_as_a` / `story_i_want` / `story_so_that`);
+   it lands in this project's Backlog marked as your proposal. Do not keep
+   a parallel task list in markdown files: the board does not read them.
 6. Acting on a card you have not looked at for a while — pass
    `expected_from=<status you saw>` to `kanban_move`, so a card a human
    has meanwhile moved is not overwritten.

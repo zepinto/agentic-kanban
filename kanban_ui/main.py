@@ -23,6 +23,10 @@ Endpoints:
     GET    /api/sessions?project=     — agent sessions (sessions strip)
     POST   /api/sessions              — register a session (launchers, hooks)
     POST   /api/sessions/{id}/status  — heartbeat / status / current card
+    POST   /api/tasks/{id}/messages   — message the agent on a card
+    POST   /api/sessions/{id}/messages — message an agent session directly
+    GET    /api/tasks/{id}/messages   — messages and replies on a card
+    GET    /api/sessions/{id}/inbox   — unread messages (hooks; marks them read)
     GET    /api/automation/status     — inbox / rules / events / webhooks
     POST   /api/automation/pause      — pause or resume automation rules
 
@@ -267,6 +271,13 @@ class SessionRegister(_Strict):
     current_task_id: str | None = None
 
 
+class MessageRequest(_Strict):
+    text: str = Field(..., validation_alias=AliasChoices("text", "body", "message"))
+    kind: str = Field("instruction", description="instruction / comment / feedback / answer / stop")
+    task_id: str | None = Field(None, description="card the message is about (session messages)")
+    parent_id: int | None = Field(None, description="message this one answers")
+
+
 class SessionStatus(_Strict):
     status: str | None = Field(None, description=f"one of {', '.join(SESSION_STATUSES)}")
     task_id: str | None = Field(None, description='current card; "" clears it')
@@ -311,7 +322,7 @@ class BlockersRequest(_Strict):
 class ProjectCreate(BaseModel):
     id: str = Field(..., description="slug: lowercase, a-z 0-9 -, 2-32 chars")
     name: str
-    color: str = "#F10D30"
+    color: str = "#0061A4"
     icon: str = ""
     sort_order: int | None = None
     path: str | None = None
@@ -389,6 +400,13 @@ def get_board(
     proj = _store.get_project(project)
     if proj is None:
         raise HTTPException(404, f"project {project} not found")
+    # Cards an agent is on right now: "live" (writing) or "waiting" (asking you).
+    live: dict[str, str] = {}
+    for sess in _store.list_sessions():
+        if sess.current_task_id and sess.status in ("active", "waiting_input"):
+            prev = live.get(sess.current_task_id)
+            live[sess.current_task_id] = "waiting" if "waiting" in (prev, sess.status) \
+                or sess.status == "waiting_input" else "live"
     by_status: dict[str, list[dict[str, Any]]] = {s: [] for s in STATUSES}
     tasks = _store.list_tasks(project_id=project, include_archived=include_archived)
     for t in tasks:
@@ -416,6 +434,8 @@ def get_board(
                 "assigned_session_id": t.assigned_session_id,
                 # run_command processes currently running for this card
                 "running": running.get(t.id, []),
+                # "live" — an agent is writing on it now; "waiting" — it asks you
+                "activity": live.get(t.id) or ("live" if running.get(t.id) else None),
             }
         )
     archived_count = 0
@@ -1026,6 +1046,70 @@ def session_status(session_id: str, req: SessionStatus) -> dict[str, Any]:
     except ValueError as e:
         raise HTTPException(400, str(e))
     return s.to_public()
+
+
+@app.post("/api/tasks/{task_id}/messages", status_code=201)
+def message_task(
+    task_id: str, req: MessageRequest, x_kanban_actor: str | None = Header(None),
+    x_kanban_via: str | None = Header(None, include_in_schema=False),
+) -> dict[str, Any]:
+    """Message the agent on a card: the agent working on it, else the one
+    that proposed it; with none attached yet the message waits for whoever
+    claims the card. It is also written to the card's history."""
+    try:
+        m = _store.send_input(
+            req.text, author=_actor(x_kanban_actor, x_kanban_via), task_id=task_id,
+            kind=req.kind, parent_id=req.parent_id,
+        )
+    except KeyError:
+        raise HTTPException(404, f"task {task_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _kick()
+    return m.to_public()
+
+
+@app.get("/api/tasks/{task_id}/messages")
+def task_messages(task_id: str) -> dict[str, Any]:
+    if _store.get_task(task_id, history_limit=0) is None:
+        raise HTTPException(404, f"task {task_id} not found")
+    session = _store.session_for_task(task_id)
+    s = _store.get_session(session) if session else None
+    return {
+        "messages": [m.to_public() for m in _store.list_inputs(task_id=task_id)],
+        "agent": s.to_public() if s else None,
+    }
+
+
+@app.post("/api/sessions/{session_id}/messages", status_code=201)
+def message_session(
+    session_id: str, req: MessageRequest, x_kanban_actor: str | None = Header(None),
+    x_kanban_via: str | None = Header(None, include_in_schema=False),
+) -> dict[str, Any]:
+    """Message an agent session directly (optionally about a card)."""
+    try:
+        m = _store.send_input(
+            req.text, author=_actor(x_kanban_actor, x_kanban_via), session_id=session_id,
+            task_id=req.task_id, kind=req.kind, parent_id=req.parent_id,
+        )
+    except KeyError as e:
+        raise HTTPException(404, f"not found: {e.args[0] if e.args else session_id}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _kick()
+    return m.to_public()
+
+
+@app.get("/api/sessions/{session_id}/inbox")
+def session_inbox(
+    session_id: str,
+    mark_delivered: bool = Query(True, description="mark returned messages as read"),
+) -> dict[str, Any]:
+    """Unread messages for a session — what the Claude Code hooks deliver."""
+    if _store.get_session(session_id) is None:
+        raise HTTPException(404, f"session {session_id} not found")
+    msgs = _store.inbox(session_id, mark_delivered=mark_delivered)
+    return {"messages": [m.to_public() for m in msgs], "count": len(msgs)}
 
 
 # ---------------------------------------------------------------------------

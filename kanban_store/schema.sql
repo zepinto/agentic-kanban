@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,                    -- 'finops', 'kanban-dev', ...
     name        TEXT NOT NULL,                       -- 'FinOps', 'Kanban Dev'
-    color       TEXT NOT NULL DEFAULT '#F10D30',     -- accent color of the project (hex)
+    color       TEXT NOT NULL DEFAULT '#0061A4',     -- accent color of the project (hex)
     icon        TEXT NOT NULL DEFAULT '',            -- 1-2 chars: 'F', 'KB', 'AI'
     sort_order  INTEGER NOT NULL DEFAULT 0,          -- order in the project switcher
     archived    INTEGER NOT NULL DEFAULT 0,          -- 0/1
@@ -125,6 +125,25 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, last_heartbeat);
+
+-- v6: messages between the human and agent sessions (the agent's inbox).
+-- A message sent to a card goes to the session working on it; with no such
+-- session yet it waits (session_id NULL) until an agent claims the card.
+CREATE TABLE IF NOT EXISTS inputs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT,                          -- recipient session (NULL = whoever takes the card)
+    task_id       TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL DEFAULT 'instruction', -- instruction/comment/feedback/answer/stop/reply
+    body          TEXT NOT NULL,
+    author        TEXT NOT NULL,                 -- user / agent name
+    parent_id     INTEGER REFERENCES inputs(id) ON DELETE SET NULL,  -- thread root for replies
+    created_at    TEXT NOT NULL,
+    delivered_at  TEXT,                          -- the agent read it
+    acked_at      TEXT                           -- the agent replied / handled it
+);
+
+CREATE INDEX IF NOT EXISTS idx_inputs_session ON inputs(session_id, delivered_at);
+CREATE INDEX IF NOT EXISTS idx_inputs_task ON inputs(task_id, id);
 
 -- meta for migrations
 CREATE TABLE IF NOT EXISTS meta (

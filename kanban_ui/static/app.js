@@ -32,16 +32,9 @@ const LS = {
   EXPANDED_COLS: "kb.expandedCols",
   ARCHIVE_OPEN: "kb.archiveOpen",
   THEME: "kb.theme",
-  PROFILE: "kb.profile",
   LAST_PROJECT: "kb.lastProject",
 };
 
-const PROFILES = ["standard", "cyberpunk", "horizon"];
-const PROFILE_LABELS = {
-  standard: "Standard",
-  cyberpunk: "Cyberpunk",
-  horizon:   "Horizon",
-};
 
 // ----------------------------------------------------------- State
 
@@ -53,7 +46,7 @@ const state = {
   search: "",
   filters: new Set(),              // 'prio:high', 'blocked', 'assignee:claude', ...
   density: localStorage.getItem(LS.DENSITY) || "comfortable",
-  theme: document.documentElement.getAttribute("data-theme") || "dark",
+  theme: document.documentElement.getAttribute("data-theme") || "light",
   sidebarCollapsed: localStorage.getItem(LS.SIDEBAR) === "collapsed",
   collapsedCols: _loadJSON(LS.COLLAPSED_COLS),
   expandedCols:  _loadJSON(LS.EXPANDED_COLS),
@@ -222,7 +215,7 @@ function render(board) {
     state.project = board.project;
     $("#topbar-title").textContent = board.project.name;
     $("#proj-mark").style.background = board.project.color;
-    document.title = `Kanban — ${board.project.name}`;
+    document.title = `Mission Board — ${board.project.name}`;
   }
   const root = $("#board");
   root.innerHTML = "";
@@ -310,7 +303,12 @@ function cardEl(t) {
   div.className = "card";
   if (t.priority === "high" || t.priority === "critical") div.classList.add("is-prio-high");
   if (t.origin === "agent" && t.status === "backlog") div.classList.add("is-proposed");
+  // what kind of attention the card needs: an agent writing on it right now,
+  // an agent asking you, a report to review, or verification under way
+  if (t.activity === "live") div.classList.add("is-live");
+  else if (t.activity === "waiting") div.classList.add("is-waiting");
   if (t.status === "results") div.classList.add("is-review");
+  if (t.status === "testing") div.classList.add("is-testing");
   if (t.archived_at) div.classList.add("is-archived");
   div.dataset.taskId = t.id;
   const running = (t.running || []).length > 0;
@@ -324,7 +322,11 @@ function cardEl(t) {
       <span class="chip chip--size-${escapeHTML(t.size)}">${escapeHTML(t.size)}</span>
       ${t.agent_model ? `<span class="chip chip--model chip--model-${escapeHTML(t.agent_model)}" title="Worker model">${escapeHTML(MODEL_TITLE[t.agent_model] || t.agent_model)}</span>` : ""}
       ${t.assignee ? `<span class="chip chip--assignee">${escapeHTML(t.assignee)}</span>` : ""}
-      ${running ? `<span class="chip chip--running" title="Running now: ${escapeHTML(t.running.join(", "))}">▶ agent</span>` : ""}
+      ${t.activity === "live" ? `<span class="chip chip--live" title="An agent is working on this card now">writing</span>` : ""}
+      ${t.activity === "waiting" ? `<span class="chip chip--waiting" title="The agent is waiting for your answer">asks you</span>` : ""}
+      ${t.status === "results" ? `<span class="chip chip--report" title="Result report waiting for your review">report</span>` : ""}
+      ${t.status === "testing" ? `<span class="chip chip--testing">testing</span>` : ""}
+      ${running && !t.activity ? `<span class="chip chip--running" title="Running now: ${escapeHTML(t.running.join(", "))}">▶ agent</span>` : ""}
       ${age ? `<span class="chip chip--age" title="In this column since ${escapeHTML(localTime(t.moved_at))}">${age}</span>` : ""}
       ${t.archived_at ? `<span class="chip chip--age" title="Archived ${escapeHTML(localTime(t.archived_at))}">archived</span>` : ""}
     </div>
@@ -548,6 +550,8 @@ async function openTaskModal(taskId) {
   renderLinks(t.links);
   renderHistory(t.history, t.history_total);
   $("#m-comment").value = "";
+  $("#m-message-text").value = "";
+  loadTaskAgent(t);
   $("#modal").hidden = false;
   history.replaceState(history.state, "", `/p/${t.project_id}/t/${encodeURIComponent(t.id)}`);
 }
@@ -611,6 +615,91 @@ async function moveModalTask(toStatus) {
   }
 }
 
+// ----------------------------------------------------------- Messages to agents
+
+function agentLabel(s) {
+  if (!s) return "";
+  const model = s.model ? ` · ${MODEL_TITLE[s.model] || s.model}` : "";
+  return `${s.agent_name}${model} · ${SESSION_STATUS_TITLE[s.status] || s.status}`;
+}
+
+async function loadTaskAgent(t) {
+  const box = $("#m-message");
+  // offer the composer whenever an agent is (or will be) on the card
+  const agentColumns = ["approved", "in_progress", "testing", "results", "blocked"];
+  box.hidden = true;
+  let r;
+  try {
+    r = await api("GET", `/api/tasks/${encodeURIComponent(t.id)}/messages`);
+  } catch { return; }
+  if (!state.modalTask || state.modalTask.id !== t.id) return;
+  const agent = r.agent;
+  if (!agent && !agentColumns.includes(t.status) && t.origin !== "agent") return;
+  box.hidden = false;
+  $("#m-message-target").textContent = agent
+    ? `to ${agentLabel(agent)}`
+    : "no agent on this card yet — the message waits for whoever takes it";
+  const unread = (r.messages || []).filter(m => m.kind !== "reply" && !m.delivered_at);
+  const pend = $("#m-message-pending");
+  pend.hidden = unread.length === 0;
+  pend.textContent = unread.length
+    ? `${unread.length} message${unread.length > 1 ? "s" : ""} not read yet: “${unread[unread.length - 1].body}”`
+    : "";
+}
+
+async function sendTaskMessage() {
+  const t = state.modalTask;
+  const text = $("#m-message-text").value.trim();
+  if (!t || !text) return;
+  try {
+    const m = await api("POST", `/api/tasks/${encodeURIComponent(t.id)}/messages`, { text });
+    $("#m-message-text").value = "";
+    toast(m.agent_name ? `Sent to ${m.agent_name}` : "Queued for the next agent on this card");
+    const fresh = await api("GET", `/api/tasks/${encodeURIComponent(t.id)}?history_limit=${HISTORY_LIMIT}`);
+    renderHistory(fresh.history, fresh.history_total);
+    loadTaskAgent(fresh);
+  } catch (e) {
+    toast(`Error: ${e.message}`, "err");
+  }
+}
+
+let msgSession = null;
+
+function openSessionMessage(s) {
+  msgSession = s;
+  $("#msg-title").textContent = `Message ${s.agent_name}`;
+  $("#msg-info").textContent = `${agentLabel(s)}` +
+    (s.current_task_id ? ` — on ${s.current_task_id}` : " — no card") +
+    (s.note ? ` — “${s.note}”` : "");
+  const pend = $("#msg-pending");
+  pend.hidden = !s.pending_inputs;
+  pend.textContent = s.pending_inputs ? `${s.pending_inputs} earlier message(s) not read yet` : "";
+  $("#btn-msg-open-card").hidden = !s.current_task_id;
+  $("#msg-text").value = "";
+  $("#msg-modal").hidden = false;
+  $("#msg-text").focus();
+}
+
+function closeSessionMessage() {
+  $("#msg-modal").hidden = true;
+  msgSession = null;
+}
+
+async function sendSessionMessage() {
+  const s = msgSession;
+  const text = $("#msg-text").value.trim();
+  if (!s || !text) return;
+  try {
+    await api("POST", `/api/sessions/${encodeURIComponent(s.id)}/messages`,
+              { text, task_id: s.current_task_id || null });
+    toast(`Sent to ${s.agent_name}`);
+    closeSessionMessage();
+    loadSessions();
+  } catch (e) {
+    toast(`Error: ${e.message}`, "err");
+  }
+}
+
 async function copyTaskLink() {
   const t = state.modalTask;
   if (!t) return;
@@ -662,7 +751,7 @@ function renderHistory(history, total) {
   }
   for (const h of (history || [])) {
     const row = document.createElement("div");
-    row.className = "h-row";
+    row.className = "h-row" + (h.action === "message" ? " h-message" : h.action === "reply" ? " h-reply" : "");
     const ts = localTime(h.ts);
     const text = h.action === "move"
       ? `${h.from_status || "—"} → ${h.to_status || "—"}` + (h.comment ? ` — ${h.comment}` : "")
@@ -962,7 +1051,7 @@ function openNewProj() {
   $("#p-path").value = "";
   $("#p-default-model").value = "sonnet";
   $("#p-analyst-model").value = "sonnet";
-  $$(".swatch").forEach(s => s.classList.toggle("is-active", s.dataset.color === "#F10D30"));
+  $$(".swatch").forEach(s => s.classList.toggle("is-active", s.dataset.color === "#0061A4"));
   resetSourceWizard();
   $("#p-connect").checked = true;    // new project: offer .mcp.json by default
   $("#proj-modal").hidden = false;
@@ -999,7 +1088,7 @@ async function saveProj() {
   const id = $("#p-id").value.trim();
   const path = $("#p-path").value.trim();
   const colorEl = $(".swatch.is-active");
-  const color = colorEl ? colorEl.dataset.color : "#F10D30";
+  const color = colorEl ? colorEl.dataset.color : "#0061A4";
   // The icon is auto-generated from the first letter of the name; the
   // backend does the same when icon is empty (see Store.create_project).
   const icon = "";
@@ -1237,17 +1326,6 @@ async function clickClaudeAuth() {
   }
 }
 
-// ----------------------------------------------------------- Profile
-
-function toggleProfile() {
-  const cur = document.documentElement.getAttribute("data-profile") || "standard";
-  const idx = PROFILES.indexOf(cur);
-  const next = PROFILES[(idx + 1) % PROFILES.length];
-  document.documentElement.setAttribute("data-profile", next);
-  localStorage.setItem(LS.PROFILE, next);
-  toast(`Profile: ${PROFILE_LABELS[next]}`);
-}
-
 // ----------------------------------------------------------- Loaders
 
 // ----------------------------------------------------------- Automation pause
@@ -1314,12 +1392,10 @@ function renderSessions() {
       <span class="session__name">${escapeHTML(s.agent_name)}</span>
       <span class="session__meta">${escapeHTML(model)} · ${escapeHTML(status)}</span>
       ${s.current_task_id ? `<span class="session__task">${escapeHTML(s.current_task_id)}</span>` : ""}
+      ${s.pending_inputs ? `<span class="session__unread" title="Messages it has not read yet">✉ ${s.pending_inputs}</span>` : ""}
     `;
-    if (s.current_task_id) {
-      chip.addEventListener("click", () => openTaskModal(s.current_task_id));
-    } else {
-      chip.disabled = true;
-    }
+    chip.title += "\nClick to message this agent";
+    chip.addEventListener("click", () => openSessionMessage(s));
     list.appendChild(chip);
   }
 }
@@ -1340,6 +1416,7 @@ async function loadBoard() {
   if ($("#modal").hidden === false) return;
   if ($("#new-modal").hidden === false) return;
   if ($("#proj-modal").hidden === false) return;
+  if ($("#msg-modal").hidden === false) return;
   try {
     const qs = `project=${encodeURIComponent(state.projectId)}` +
       (state.showArchived ? "&include_archived=true" : "");
@@ -1445,6 +1522,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Buttons
   $("#btn-save").addEventListener("click", saveModal);
   $("#btn-approve").addEventListener("click", () => moveModalTask("approved"));
+  $("#btn-send-message").addEventListener("click", sendTaskMessage);
+  $("#m-message-text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendTaskMessage();
+  });
+  $$("[data-close-msg]").forEach((el) => el.addEventListener("click", closeSessionMessage));
+  $("#btn-msg-send").addEventListener("click", sendSessionMessage);
+  $("#msg-text").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendSessionMessage();
+  });
+  $("#btn-msg-open-card").addEventListener("click", () => {
+    const tid = msgSession && msgSession.current_task_id;
+    closeSessionMessage();
+    if (tid) openTaskModal(tid);
+  });
   $("#btn-to-analysis").addEventListener("click", () => moveModalTask("analysis"));
   $$("#m-model button").forEach(b => b.addEventListener("click", () =>
     setModalModel(state.modalModel === b.dataset.model ? "" : b.dataset.model)));
@@ -1458,7 +1549,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btn-snapshot").addEventListener("click", snapshot);
   $("#btn-density").addEventListener("click", toggleDensity);
   $("#btn-theme").addEventListener("click", toggleTheme);
-  $("#btn-profile").addEventListener("click", toggleProfile);
   $("#btn-claude-auth").addEventListener("click", clickClaudeAuth);
   $("#btn-automation").addEventListener("click", toggleAutomation);
   $("#btn-resume-automation").addEventListener("click", toggleAutomation);
@@ -1535,6 +1625,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       closeModal();
       closeNewModal();
       closeNewProj();
+      closeSessionMessage();
       if (state.search) clearSearch();
       return;
     }
@@ -1549,8 +1640,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       toggleDensity();
     } else if (e.key === "t") {
       toggleTheme();
-    } else if (e.key === "p") {
-      toggleProfile();
     } else if (e.key === "\\") {
       toggleSidebar();
     } else if (e.key === "r") {

@@ -341,3 +341,96 @@ def test_rest_project_models(client):
     r = client.patch("/api/projects/mb", json={"analyst_model": "Opus"})
     assert r.status_code == 200 and r.json()["analyst_model"] == "opus"
     assert client.patch("/api/projects/mb", json={"default_model": "x"}).status_code == 400
+
+
+# ---------------------------------------------------------------- messages
+
+
+def test_message_waits_for_the_agent_that_claims_the_card(store):
+    t = store.create_task("x", project_id="proj", status="approved")
+    m = store.send_input("use the LSF format", author="user", task_id=t.id)
+    assert m.session_id is None
+    store.register_session("w1", "worker-1", project_id="proj")
+    assert store.pending_inputs("w1") == 0          # not its card yet
+    store.pull_task(t.id, "worker-1", session_id="w1")
+    assert store.pending_inputs("w1") == 1
+    msgs = store.inbox("w1")
+    assert [x.body for x in msgs] == ["use the LSF format"] and msgs[0].session_id == "w1"
+    assert store.inbox("w1") == []                  # read once
+    r = store.reply_input(msgs[0].id, "switching to LSF", author="worker-1")
+    assert r.kind == "reply" and r.parent_id == msgs[0].id
+    assert store.get_input(msgs[0].id).acked_at is not None
+    actions = [(h.action, h.comment) for h in store.get_task(t.id).history]
+    assert ("message", "(waiting for an agent): use the LSF format") in actions
+    assert ("reply", "switching to LSF") in actions
+
+
+def test_message_to_card_routes_to_bound_or_proposing_session(store):
+    store.register_session("w2", "worker-2", project_id="proj")
+    idea = store.create_task("idea", project_id="proj", origin="agent", origin_session_id="w2")
+    m = store.send_input("why this?", author="user", task_id=idea.id)
+    assert m.session_id == "w2" and m.agent_name == "worker-2"
+    assert store.list_sessions()[0].pending_inputs == 1
+    with pytest.raises(ValueError):
+        store.send_input("  ", author="user", task_id=idea.id)
+    with pytest.raises(KeyError):
+        store.send_input("x", author="user", session_id="ghost")
+
+
+@pytest.mark.asyncio
+async def test_mcp_inbox_and_pending_hint(mcp_store, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cc-inbox")
+    monkeypatch.setenv("KANBAN_PROJECT_ID", "proj")
+    r = await _call("kanban_create", title="x")          # registers the session
+    assert "inbox_pending" not in r
+    mcp_store.send_input("stop and summarise", author="user", session_id="cc-inbox")
+    r = await _call("kanban_list")
+    assert r["inbox_pending"] == 1 and "inbox_get" in r["inbox_hint"]
+    got = await _call("inbox_get")
+    assert got["data"]["count"] == 1 and got["data"]["messages"][0]["text"] == "stop and summarise"
+    rep = await _call("inbox_reply", input_id=got["data"]["messages"][0]["id"], text="done")
+    assert rep["ok"]
+    assert "inbox_pending" not in await _call("kanban_list")
+
+
+def test_stop_hook_blocks_with_messages(store, monkeypatch, capsys):
+    import io
+    from kanban_mcp import hook
+
+    store.register_session("cc-hook", "worker-5", project_id="proj")
+    monkeypatch.setenv("KANBAN_DB", str(store.db_path))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+        {"session_id": "cc-hook", "hook_event_name": "Stop"})))
+    assert hook.main() == 0 and capsys.readouterr().out == ""   # nothing waiting
+    store.send_input("one more plot please", author="user", session_id="cc-hook")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(
+        {"session_id": "cc-hook", "hook_event_name": "Stop"})))
+    assert hook.main() == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["decision"] == "block" and "one more plot please" in out["reason"]
+    assert store.pending_inputs("cc-hook") == 0
+
+
+def test_rest_messages_and_card_activity(client):
+    client.post("/api/sessions", json={"id": "act-1", "agent_name": "worker-7",
+                                       "project_id": "mb"})
+    t = client.post("/api/tasks", json={"title": "live one", "project_id": "mb",
+                                        "status": "in_progress"}).json()
+    client.post("/api/sessions/act-1/status", json={"status": "active", "task_id": t["id"]})
+    board = client.get("/api/board", params={"project": "mb"}).json()
+    card = next(c for c in board["tasks"]["in_progress"] if c["id"] == t["id"])
+    assert card["activity"] == "live"
+    client.post("/api/sessions/act-1/status", json={"status": "waiting_input"})
+    board = client.get("/api/board", params={"project": "mb"}).json()
+    card = next(c for c in board["tasks"]["in_progress"] if c["id"] == t["id"])
+    assert card["activity"] == "waiting"
+    r = client.post(f"/api/tasks/{t['id']}/messages", json={"text": "go ahead"})
+    assert r.status_code == 201 and r.json()["session_id"] == "act-1"
+    got = client.get(f"/api/tasks/{t['id']}/messages").json()
+    assert got["agent"]["id"] == "act-1" and got["messages"][0]["body"] == "go ahead"
+    inbox = client.get("/api/sessions/act-1/inbox").json()
+    assert inbox["count"] == 1
+    assert client.get("/api/sessions/act-1/inbox").json()["count"] == 0
+    r = client.post("/api/sessions/act-1/messages", json={"text": "hi", "task_id": t["id"]})
+    assert r.status_code == 201
+    assert client.post("/api/tasks/T-999/messages", json={"text": "x"}).status_code == 404

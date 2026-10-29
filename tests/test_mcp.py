@@ -119,5 +119,5 @@ async def test_pull_returns_the_card(mcp_store):
 @pytest.mark.asyncio
 async def test_tool_schemas_forbid_extra_properties():
     tools = await server.mcp.list_tools()
-    assert len(tools) == 19  # 16 upstream + task_propose, session_register, session_status
+    assert len(tools) == 21  # 16 upstream + task_propose, session_*, inbox_get, inbox_reply
     assert all(t.inputSchema.get("additionalProperties") is False for t in tools)

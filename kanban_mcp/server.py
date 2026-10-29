@@ -64,6 +64,8 @@ Tools:
 * ``task_propose``     — propose a task or user story; always lands in Backlog
 * ``session_register`` — announce this agent session on the board
 * ``session_status``   — report status / current card / a short note
+* ``inbox_get``        — read the human's messages to this session (can wait)
+* ``inbox_reply``      — answer a message; the reply shows on the card
 
 Changes made here land in ``task_history``; the web server's event feed
 picks them up within about a second, so automation rules and webhooks fire
@@ -183,7 +185,26 @@ def _err(msg: str) -> dict[str, Any]:
 
 
 def _ok(payload: Any) -> dict[str, Any]:
-    return {"ok": True, "data": payload}
+    out: dict[str, Any] = {"ok": True, "data": payload}
+    # Piggyback: whatever the agent called, tell it the human is waiting.
+    n = _inbox_pending()
+    if n:
+        out["inbox_pending"] = n
+        out["inbox_hint"] = (
+            f"{n} unread message(s) from the human — call inbox_get now and "
+            "act on them before continuing."
+        )
+    return out
+
+
+def _inbox_pending() -> int:
+    sid = _session_id() if "_session_id" in globals() else None
+    if not sid:
+        return 0
+    try:
+        return _get_store().pending_inputs(sid)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +287,7 @@ def kanban_projects() -> dict[str, Any]:
 
     Returns:
         {"ok": true, "data": {"projects": [
-            {"id": "myproj", "name": "My project", "color": "#F10D30",
+            {"id": "myproj", "name": "My project", "color": "#0061A4",
              "path": "/abs/path", "task_counts": {"backlog": 5, ...},
              "total_tasks": 33, "archived": false}
         ]}}
@@ -770,6 +791,62 @@ def session_status(
     except Exception as e:
         return _err(str(e))
     return _ok(s.to_public())
+
+
+@mcp.tool()
+def inbox_get(wait_seconds: int = 0) -> dict[str, Any]:
+    """Read the human's messages to you (instructions, comments on your
+    reports, answers to your questions). Messages are marked read.
+
+    Every tool response carries ``inbox_pending`` when something is waiting,
+    so call this whenever you see it — and before you stop.
+
+    Args:
+        wait_seconds: 0 (default) returns at once; up to 60 waits for a
+            message to arrive (use it after asking a question).
+    """
+    import time
+
+    _heartbeat()
+    sid = _session_id()
+    if not sid:
+        return _err("no session: call session_register first")
+    deadline = time.monotonic() + max(0, min(int(wait_seconds or 0), 60))
+    while True:
+        try:
+            msgs = _get_store().inbox(sid)
+        except Exception as e:
+            return _err(str(e))
+        if msgs or time.monotonic() >= deadline:
+            break
+        time.sleep(1.0)
+    return _ok({
+        "messages": [
+            {"id": m.id, "kind": m.kind, "text": m.body, "from": m.author,
+             "task_id": m.task_id, "sent_at": m.created_at}
+            for m in msgs
+        ],
+        "count": len(msgs),
+    })
+
+
+@mcp.tool()
+def inbox_reply(input_id: int, text: str, done: bool = True, actor: str | None = None) -> dict[str, Any]:
+    """Answer one of the human's messages. The reply is threaded under it
+    and appears in the card's history.
+
+    Args:
+        input_id: the message ``id`` from inbox_get.
+        text: your answer — what you will do, or did.
+        done: true (default) marks the message handled.
+    """
+    try:
+        r = _get_store().reply_input(input_id, text, author=_actor(actor), done=done)
+    except KeyError:
+        return _err(f"message {input_id} not found")
+    except Exception as e:
+        return _err(str(e))
+    return _ok({"reply_id": r.id, "task_id": r.task_id})
 
 
 # ---------------------------------------------------------------------------

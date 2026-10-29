@@ -279,6 +279,30 @@ class Session:
     started_by: str                # hub (started by the board) | manual
     started_at: str
     last_heartbeat: str
+    pending_inputs: int = 0        # messages the agent has not read yet
+
+    def to_public(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+# Kinds of message in an agent's inbox.
+INPUT_KINDS: tuple[str, ...] = ("instruction", "comment", "feedback", "answer", "stop", "reply")
+
+
+@dataclass
+class Input:
+    """A message to (or a reply from) an agent session."""
+    id: int
+    session_id: str | None
+    task_id: str | None
+    kind: str
+    body: str
+    author: str
+    parent_id: int | None
+    created_at: str
+    delivered_at: str | None
+    acked_at: str | None
+    agent_name: str | None = None   # recipient's display name, when known
 
     def to_public(self) -> dict[str, Any]:
         return asdict(self)
@@ -484,7 +508,7 @@ class Store:
         if row["n"] == 0:
             default_id = os.environ.get("KANBAN_DEFAULT_PROJECT_ID", "default")
             default_name = os.environ.get("KANBAN_DEFAULT_PROJECT_NAME", "Default")
-            default_color = os.environ.get("KANBAN_DEFAULT_PROJECT_COLOR", "#F10D30")
+            default_color = os.environ.get("KANBAN_DEFAULT_PROJECT_COLOR", "#0061A4")
             default_icon = os.environ.get(
                 "KANBAN_DEFAULT_PROJECT_ICON", default_name[:1].upper()
             )
@@ -1417,7 +1441,217 @@ class Store:
         sql += " ORDER BY last_heartbeat DESC, id"
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
-        return [self._row_to_session(r) for r in rows]
+            sessions = [self._row_to_session(r) for r in rows]
+            for s in sessions:
+                s.pending_inputs = self._pending_count(s.id)
+        return sessions
+
+    # ------------------------------------------------------------------
+    # Messages to agents (inbox)
+    # ------------------------------------------------------------------
+
+    def session_for_task(self, task_id: str) -> str | None:
+        """The session a message about ``task_id`` should reach: the agent
+        bound to the card, else a live session currently on it, else the
+        agent that proposed it. None when no agent is attached."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT assigned_session_id, origin_session_id FROM tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["assigned_session_id"]:
+                return row["assigned_session_id"]
+            r2 = self._conn.execute(
+                "SELECT id FROM sessions WHERE current_task_id=? AND status != 'finished' "
+                "ORDER BY last_heartbeat DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if r2:
+                return r2["id"]
+            return row["origin_session_id"]
+
+    def send_input(
+        self,
+        body: str,
+        *,
+        author: str,
+        session_id: str | None = None,
+        task_id: str | None = None,
+        kind: str = "instruction",
+        parent_id: int | None = None,
+    ) -> Input:
+        """Queue a message for an agent. Addressed to a session, a card (the
+        card's agent, resolved now — or later, by whoever claims it), or both.
+        A message about a card is also written to the card's history."""
+        body = (body or "").strip()
+        if not body:
+            raise ValueError("message text must not be empty")
+        kind = normalize_choice(kind, INPUT_KINDS, "message kind")
+        session_id = (session_id or "").strip() or None
+        task_id = (task_id or "").strip() or None
+        if session_id is None and task_id is None:
+            raise ValueError("a message needs a session_id or a task_id")
+        ts = _now()
+        with self._lock:
+            if task_id is not None and not self._task_exists(task_id):
+                raise KeyError(task_id)
+            if session_id is not None and self.get_session(session_id) is None:
+                raise KeyError(session_id)
+            if session_id is None:
+                session_id = self.session_for_task(task_id)
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self._conn.execute(
+                    """INSERT INTO inputs (session_id, task_id, kind, body, author,
+                                           parent_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (session_id, task_id, kind, body, author or "user", parent_id, ts),
+                )
+                iid = cur.lastrowid
+                if task_id is not None:
+                    who = self._agent_name(session_id)
+                    note = f"to {who}: {body}" if who else f"(waiting for an agent): {body}"
+                    self._insert_history(task_id, ts, author or "user", "message", None, None, note)
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        msg = self.get_input(iid)
+        assert msg is not None
+        return msg
+
+    def reply_input(self, input_id: int, body: str, *, author: str, done: bool = True) -> Input:
+        """An agent answers a message. The reply is threaded under it and
+        lands in the card's history; ``done`` marks the message handled."""
+        body = (body or "").strip()
+        if not body:
+            raise ValueError("reply text must not be empty")
+        parent = self.get_input(input_id)
+        if parent is None:
+            raise KeyError(input_id)
+        ts = _now()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self._conn.execute(
+                    """INSERT INTO inputs (session_id, task_id, kind, body, author,
+                                           parent_id, created_at, delivered_at)
+                       VALUES (?, ?, 'reply', ?, ?, ?, ?, ?)""",
+                    (parent.session_id, parent.task_id, body, author, parent.id, ts, ts),
+                )
+                rid = cur.lastrowid
+                self._conn.execute(
+                    "UPDATE inputs SET delivered_at=COALESCE(delivered_at, ?)"
+                    + (", acked_at=?" if done else "") + " WHERE id=?",
+                    (ts, ts, parent.id) if done else (ts, parent.id),
+                )
+                if parent.task_id:
+                    self._insert_history(parent.task_id, ts, author, "reply", None, None, body)
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        r = self.get_input(rid)
+        assert r is not None
+        return r
+
+    def inbox(self, session_id: str, *, mark_delivered: bool = True, limit: int = 50) -> list[Input]:
+        """Unread messages for a session, oldest first: those addressed to it,
+        plus card messages still waiting for an agent on a card it holds (they
+        are claimed for this session as they are read)."""
+        ts = _now()
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT * FROM inputs
+                    WHERE delivered_at IS NULL AND kind != 'reply' AND (
+                      session_id = ?
+                      OR (session_id IS NULL AND task_id IN ({self._held_tasks_sql()}))
+                    )
+                    ORDER BY id LIMIT ?""",
+                (session_id, session_id, session_id, int(limit)),
+            ).fetchall()
+            msgs = [self._row_to_input(r) for r in rows]
+            if mark_delivered and msgs:
+                ids = [m.id for m in msgs]
+                ph = ",".join("?" * len(ids))
+                self._conn.execute(
+                    f"UPDATE inputs SET delivered_at=?, session_id=COALESCE(session_id, ?) "
+                    f"WHERE id IN ({ph})",
+                    (ts, session_id, *ids),
+                )
+                for m in msgs:
+                    m.delivered_at = ts
+                    m.session_id = m.session_id or session_id
+        return msgs
+
+    @staticmethod
+    def _held_tasks_sql() -> str:
+        """Subquery (two ? = session id) for the cards a session holds."""
+        return ("SELECT id FROM tasks WHERE assigned_session_id = ? "
+                "UNION SELECT current_task_id FROM sessions WHERE id = ? "
+                "AND current_task_id IS NOT NULL")
+
+    def _pending_count(self, session_id: str) -> int:
+        row = self._conn.execute(
+            f"""SELECT COUNT(*) AS n FROM inputs
+                WHERE delivered_at IS NULL AND kind != 'reply' AND (
+                  session_id = ?
+                  OR (session_id IS NULL AND task_id IN ({self._held_tasks_sql()})))""",
+            (session_id, session_id, session_id),
+        ).fetchone()
+        return int(row["n"])
+
+    def pending_inputs(self, session_id: str) -> int:
+        with self._lock:
+            return self._pending_count(session_id)
+
+    def get_input(self, input_id: int) -> Input | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM inputs WHERE id=?", (int(input_id),)).fetchone()
+        return self._row_to_input(row) if row else None
+
+    def list_inputs(
+        self, *, task_id: str | None = None, session_id: str | None = None, limit: int = 200,
+    ) -> list[Input]:
+        """Messages and replies for a card or a session, oldest first."""
+        sql = "SELECT * FROM inputs WHERE 1=1"
+        params: list[Any] = []
+        if task_id is not None:
+            sql += " AND task_id = ?"
+            params.append(task_id)
+        if session_id is not None:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 1000)))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()[::-1]
+        return [self._row_to_input(r) for r in rows]
+
+    def _agent_name(self, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        row = self._conn.execute(
+            "SELECT agent_name FROM sessions WHERE id=?", (session_id,)
+        ).fetchone()
+        return row["agent_name"] if row else None
+
+    def _row_to_input(self, row: sqlite3.Row) -> Input:
+        return Input(
+            id=row["id"],
+            session_id=row["session_id"],
+            task_id=row["task_id"],
+            kind=row["kind"],
+            body=row["body"],
+            author=row["author"],
+            parent_id=row["parent_id"],
+            created_at=row["created_at"],
+            delivered_at=row["delivered_at"],
+            acked_at=row["acked_at"],
+            agent_name=self._agent_name(row["session_id"]),
+        )
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
         status = row["status"]
@@ -1490,7 +1724,7 @@ class Store:
         project_id: str,
         name: str,
         *,
-        color: str = "#F10D30",
+        color: str = "#0061A4",
         icon: str = "",
         sort_order: int | None = None,
         path: str | None = None,

@@ -3,30 +3,22 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Kanban</title>
+  <title>Mission Board</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=Cinzel:wght@500;600;700&family=Marcellus&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=0.3.0-mb1" />
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,600&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css?v=0.3.0-mb2" />
   <script>
-    // Apply saved theme and profile before body parses — no flash of wrong styles.
-    // Also accept ?theme=light|dark and ?profile=standard|cyberpunk|horizon
-    // as a one-off override (handy for screenshots, shareable links, demos).
+    // Apply the saved light/dark scheme before body parses — no flash.
+    // ?theme=light|dark is a one-off override (screenshots, shared links).
     (function () {
-      var qs = new URLSearchParams(location.search);
-      var qsTheme = qs.get("theme");
+      var qsTheme = new URLSearchParams(location.search).get("theme");
       if (qsTheme === "light" || qsTheme === "dark") {
         localStorage.setItem("kb.theme", qsTheme);
       }
-      var qsProfile = qs.get("profile");
-      if (qsProfile === "standard" || qsProfile === "cyberpunk" || qsProfile === "horizon") {
-        localStorage.setItem("kb.profile", qsProfile);
-      }
       var t = localStorage.getItem("kb.theme");
-      if (!t) t = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      if (!t) t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
       document.documentElement.setAttribute("data-theme", t);
-      var p = localStorage.getItem("kb.profile") || "standard";
-      document.documentElement.setAttribute("data-profile", p);
     })();
   </script>
 </head>
@@ -37,7 +29,7 @@
     <aside class="sidebar" id="sidebar">
       <div class="sidebar__head">
         <span class="brand__mark"></span>
-        <span class="sidebar__brand">Kanban</span>
+        <span class="sidebar__brand">Mission Board</span>
         <button class="btn btn--icon sidebar__toggle" id="btn-sidebar" title="Collapse (\\)" aria-label="Collapse">‹</button>
       </div>
       <nav class="proj-list" id="proj-list">
@@ -66,23 +58,15 @@
           <input type="text" id="search" placeholder="Search (/) — title, id, description" autocomplete="off" />
           <button class="search__clear" id="btn-search-clear" hidden aria-label="Clear">×</button>
         </div>
-        <div class="topbar__filters" id="filters">
-          <button class="filter-chip" data-filter="prio:high" title="HIGH only">HIGH</button>
-          <button class="filter-chip" data-filter="blocked" title="With blocker only">Blocker</button>
-          <button class="filter-chip" data-filter="assignee:agent" title="Agents only">Agents</button>
-          <button class="filter-chip" data-filter="unassigned" title="No assignee">Unassigned</button>
-          <button class="filter-chip" data-filter="proposed" title="Proposed by an agent">Proposals</button>
-        </div>
         <div class="topbar__actions">
           <button class="btn btn--icon automation-toggle" id="btn-automation" title="Pause automation (rules, agent launches)" aria-label="Automation">⏸</button>
           <button class="btn btn--icon claude-auth claude-auth--unknown" id="btn-claude-auth" title="Claude CLI status" aria-label="Claude auth">
             <span class="claude-auth__mark">C</span>
           </button>
-          <button class="btn btn--icon" id="btn-profile" title="Switch theme profile (p)" aria-label="Profile">◇</button>
           <button class="btn btn--icon" id="btn-theme" title="Toggle theme (t)" aria-label="Theme">◐</button>
           <button class="btn btn--icon" id="btn-density" title="Card density (d)" aria-label="Density">≡</button>
           <button class="btn btn--ghost" id="btn-snapshot" title="Snapshot board → snapshots/">Snapshot</button>
-          <button class="btn btn--ghost" id="btn-refresh" title="Refresh (r)" aria-label="Refresh">↻</button>
+          <button class="btn btn--icon" id="btn-refresh" title="Refresh (r)" aria-label="Refresh">↻</button>
           <button class="btn btn--primary" id="btn-new" title="New task (n)">+ Task</button>
         </div>
       </header>
@@ -91,10 +75,19 @@
         Automation is paused — rules don't act and no agents are launched.
         <button class="btn btn--ghost" id="btn-resume-automation">Resume</button>
       </div>
-      <section class="sessions" id="sessions" hidden aria-label="Agent sessions">
-        <span class="sessions__label">Sessions</span>
-        <div class="sessions__list" id="sessions-list"></div>
-      </section>
+      <div class="toolbar">
+        <section class="sessions" id="sessions" hidden aria-label="Agent sessions">
+          <span class="sessions__label">Sessions</span>
+          <div class="sessions__list" id="sessions-list"></div>
+        </section>
+        <div class="topbar__filters" id="filters">
+          <button class="filter-chip" data-filter="prio:high" title="HIGH only">HIGH</button>
+          <button class="filter-chip" data-filter="blocked" title="With blocker only">Blocker</button>
+          <button class="filter-chip" data-filter="assignee:agent" title="Agents only">Agents</button>
+          <button class="filter-chip" data-filter="unassigned" title="No assignee">Unassigned</button>
+          <button class="filter-chip" data-filter="proposed" title="Proposed by an agent">Proposals</button>
+        </div>
+      </div>
       <main class="board" id="board">
         <!-- columns rendered by app.js -->
       </main>
@@ -112,6 +105,18 @@
         <button class="btn btn--icon" data-close aria-label="Close">×</button>
       </header>
       <div class="modal__body">
+        <section class="message" id="m-message" hidden>
+          <div class="message__head">
+            <span class="message__title">Message the agent</span>
+            <span class="message__target" id="m-message-target"></span>
+          </div>
+          <div class="message__pending" id="m-message-pending" hidden></div>
+          <textarea id="m-message-text" rows="2" placeholder="An instruction, a correction, an answer to its question…"></textarea>
+          <div class="message__actions">
+            <span class="field__hint">Delivered the next time the agent checks in; its reply appears in the history below.</span>
+            <button class="btn btn--primary" id="btn-send-message">Send</button>
+          </div>
+        </section>
         <div class="field">
           <label>Title</label>
           <input type="text" id="m-title" />
@@ -364,14 +369,14 @@
         <div class="field">
           <label>Color</label>
           <div class="color-palette" id="p-palette">
-            <button class="swatch is-active" data-color="#F10D30" style="background:#F10D30" aria-label="red"></button>
-            <button class="swatch" data-color="#16315A" style="background:#16315A" aria-label="navy"></button>
-            <button class="swatch" data-color="#1E7A57" style="background:#1E7A57" aria-label="green"></button>
-            <button class="swatch" data-color="#0E7C9C" style="background:#0E7C9C" aria-label="teal"></button>
-            <button class="swatch" data-color="#7A4592" style="background:#7A4592" aria-label="plum"></button>
-            <button class="swatch" data-color="#8C6411" style="background:#8C6411" aria-label="copper"></button>
-            <button class="swatch" data-color="#5A6A4A" style="background:#5A6A4A" aria-label="olive"></button>
-            <button class="swatch" data-color="#475569" style="background:#475569" aria-label="graphite"></button>
+            <button class="swatch is-active" data-color="#0061A4" style="background:#0061A4" aria-label="blue"></button>
+            <button class="swatch" data-color="#006A6A" style="background:#006A6A" aria-label="teal"></button>
+            <button class="swatch" data-color="#2B6A46" style="background:#2B6A46" aria-label="green"></button>
+            <button class="swatch" data-color="#6B5778" style="background:#6B5778" aria-label="purple"></button>
+            <button class="swatch" data-color="#8B5000" style="background:#8B5000" aria-label="amber"></button>
+            <button class="swatch" data-color="#B3261E" style="background:#B3261E" aria-label="red"></button>
+            <button class="swatch" data-color="#984061" style="background:#984061" aria-label="rose"></button>
+            <button class="swatch" data-color="#5B5F71" style="background:#5B5F71" aria-label="slate"></button>
           </div>
         </div>
         <!-- ==== Source wizard ==== -->
@@ -443,9 +448,33 @@
     </div>
   </div>
 
+  <!-- ========== Message an agent session ========== -->
+  <div class="modal" id="msg-modal" hidden>
+    <div class="modal__backdrop" data-close-msg></div>
+    <div class="modal__panel modal__panel--narrow">
+      <header class="modal__head">
+        <span class="task-id" id="msg-title">Message</span>
+        <button class="btn btn--icon" data-close-msg aria-label="Close">×</button>
+      </header>
+      <div class="modal__body">
+        <span class="field__hint" id="msg-info"></span>
+        <div class="message__pending" id="msg-pending" hidden></div>
+        <div class="field">
+          <label>Message</label>
+          <textarea id="msg-text" rows="4" placeholder="What should the agent do?"></textarea>
+        </div>
+      </div>
+      <footer class="modal__foot">
+        <button class="btn btn--ghost modal__foot-left" id="btn-msg-open-card" hidden>Open card</button>
+        <button class="btn btn--ghost" data-close-msg>Cancel</button>
+        <button class="btn btn--primary" id="btn-msg-send">Send</button>
+      </footer>
+    </div>
+  </div>
+
   <div class="toast" id="toast" hidden></div>
 
   <script src="/static/vendor/Sortable.min.js"></script>
-  <script src="/static/app.js?v=0.3.0-mb1"></script>
+  <script src="/static/app.js?v=0.3.0-mb2"></script>
 </body>
 </html>
