@@ -7,7 +7,7 @@ focused, write a test if you can, document any new env-var.
 
 ```bash
 git clone <your-fork>
-cd agent-kanban
+cd agentic-kanban
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pip install -r requirements-dev.txt

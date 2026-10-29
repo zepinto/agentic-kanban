@@ -7,18 +7,18 @@ today — no "future features".
 ## Task lifecycle
 
 ```
-                user                                       agent (Claude/Cline/...)
-                 ↓                                                ↓
-   ┌────────┐  push  ┌──────────┐  pull  ┌──────────┐  ────→  ┌────────────┐
-   │ Backlog│ ─────→ │ Approved │ ─────  │ Analyst  │         │ In progress│
-   └────────┘        └──────────┘        └──────────┘         └────────────┘
-                                                                    │
-                                                                    ↓
-   ┌────────┐  ←──── ┌──────────┐  ←──── ┌────────────┐
-   │  Done  │ accept │   UAT    │  done  │  Testing   │
-   └────────┘        └──────────┘        └────────────┘
+      you + agents (task_propose)      you or analyst agent         you
+                 ↓                              ↓                     ↓
+   ┌────────┐  refine  ┌──────────┐  approve  ┌──────────┐  pull   ┌─────────────┐
+   │ Backlog│ ───────→ │ Analysis │ ────────→ │ Approved │ ──────→ │ In progress │
+   └────────┘          └──────────┘  (model)  └──────────┘ (agent) └─────────────┘
+                                                                          │
+                                                                          ↓
+   ┌────────┐  accept  ┌──────────┐   final result (+ optional Testing)   │
+   │  Done  │ ←─────── │ Results  │ ←──────────────────────────────────────┘
+   └────────┘          └──────────┘
 
-   Blocked — a parallel column for anything that's stuck.
+   Blocked — a parallel column for anything that's stuck (agent questions).
    Cancelled — terminal state for "we're not doing this".
 ```
 
@@ -33,10 +33,10 @@ in `kanban_store/store.py` (`STATUSES` + `status_meta()`).
 **Who:** new user who just cloned the repo.
 
 **Steps:**
-1. `git clone … && cd agent-kanban`
+1. `git clone … && cd agentic-kanban`
 2. `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`
 3. `.venv/bin/python -m kanban_ui` → http://localhost:7777
-4. They see the **`default` project** with an empty board, 9 columns, sidebar on the left, and a `+ Task` button in the topbar.
+4. They see the **`default` project** with an empty board (Backlog → Analysis → Approved → In progress → Results → Done), sidebar on the left, and a `+ Task` button in the top bar.
 
 **Outcome:** runs locally, DB in `tasks.db`, no accounts, no cloud.
 
@@ -65,7 +65,7 @@ Optional: `bash scripts/install_launchd.sh install` — auto-start on login.
 3. Restart Claude Code (`/mcp restart agent-kanban`).
 4. In chat: *"show me what I'm working on"* → the agent calls `kanban_my_active(assignee="claude", project_id="myproj")`.
 
-**Outcome:** the agent knows the context — it can `kanban_pull` a task from Approved, drop `kanban_comment` notes as it works, and finally `kanban_move(task_id, "testing")`.
+**Outcome:** the agent knows the context — it can `kanban_pull` a task from Approved, drop `kanban_comment` notes as it works, and finally `kanban_move(task_id, "results")`.
 
 ---
 
@@ -131,12 +131,12 @@ UI alternative: `/p/myproj` → HIGH filter → density compact → everything v
 
 **Flow:**
 1. `kanban_get("T-008")` — reads description + acceptance + history.
-2. `kanban_pull("T-008")` — atomically `approved → analyst, assignee=claude`.
+2. `kanban_pull("T-008")` — atomically `approved → in_progress, assignee=claude`.
 3. *(code analysis, plan)* → `kanban_comment("T-008", "Plan: ...")`.
 4. `kanban_move("T-008", "in_progress", comment="started writing the parser")`.
 5. *(work)* → `kanban_link("T-008", "pr", "https://github.com/.../pull/42")`.
-6. `kanban_move("T-008", "testing", comment="code+tests ready")` — webhook fires into Slack.
-7. In the UI you see the card in Testing, you review → drag-drop into **UAT** → **Done**.
+6. `kanban_move("T-008", "results", comment="code+tests ready")` — webhook fires into Slack.
+7. In the UI you see the card in Results, you review → drag-drop into **Done** (or message the agent from the card).
 
 **Outcome:** the task ran the full workflow; history holds every step with the actor (`claude`), PR links, and comments.
 
@@ -258,9 +258,9 @@ The UI sidebar remembers the last-opened project (`localStorage.kb.lastProject`)
 1. UI, REST, an MCP agent or a script → `move_task(T-027, to_status="approved")` → a row in `task_history`.
 2. The server's event feed sees the row (within ~1 s, whoever wrote it) → the rule engine matches and starts `launch-claude.sh T-027 myproj`. A card *created* directly in Approved counts too.
 3. The launcher checks the card, the `claude` binary and the login, then runs `claude -p` in the project directory with an explicit `--mcp-config`, `--permission-mode dontAsk` and a timeout. It stays in the foreground while the agent works; the card shows a `▶ agent` chip.
-4. Through MCP, Claude calls `kanban_pull(T-027)` (approved → analyst, assignee=claude), posts a plan via `kanban_comment`, moves to `in_progress`, implements, and finally `kanban_move(T-027, "testing", comment="what was done, how it was verified")`.
+4. Through MCP, Claude calls `kanban_pull(T-027)` (approved → in_progress, assignee=claude), posts a plan via `kanban_comment`, implements, and finally `kanban_move(T-027, "results", comment="what was done, how it was verified")`.
 5. If the agent exits and leaves the card behind (crash, timeout, missing login), the launcher moves it to **Blocked** with the reason and the log path.
-6. In the UI you see the card in Testing, you review → drag into **UAT** → **Done**.
+6. In the UI you see the card in Results, you review → drag into **Done**.
 
 **Triggers (rule.trigger.type=task_moved):**
 - `to_status` (required) — destination column.

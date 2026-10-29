@@ -1,4 +1,4 @@
-# Quickstart — agent-kanban in 5 minutes
+# Quickstart — agentic-kanban (Mission Board) in 5 minutes
 
 End-to-end path: clone → run → AI agent picks up an Approved task on its own.
 If you don't need AI, skip Part 2 and use it as a regular kanban board.
@@ -20,8 +20,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh   # or: brew install uv
 ### Clone + run
 
 ```bash
-git clone https://github.com/<user>/agent-kanban.git
-cd agent-kanban
+git clone https://github.com/zepinto/agentic-kanban.git
+cd agentic-kanban
 uv run python -m kanban_ui     # auto-creates .venv, installs deps, runs
 # open http://localhost:7777
 ```
@@ -41,7 +41,7 @@ python3.12 -m venv .venv
 
 </details>
 
-A `default` project shows up in the sidebar with an empty board and 9 columns.
+A `default` project shows up in the sidebar with an empty board: Backlog, Analysis, Approved, In progress, Results, Done, plus Blocked and Cancelled (Testing is folded away).
 Hit `+ Task` (or press `n`) and create your first card.
 
 ### macOS auto-start (optional)
@@ -59,10 +59,10 @@ Logs: `~/Library/Logs/agent-kanban/{stdout,stderr}.log`.
 
 The flow: you drag a card from "Backlog" to "Approved", and **Claude Code**
 (or any other agent) automatically:
-1. Claims the task (`approved → analyst`),
+1. Claims the task (`approved → in_progress`) on the card's worker model (Opus / Sonnet / Haiku, picked in Analysis or the project default),
 2. Posts a plan as a comment,
 3. Moves it to `in_progress` and implements,
-4. Moves it to `testing` with a comment "ready for review".
+4. Moves it to `results` with a comment on what was done and how it was verified. You accept it into Done, or message the agent from the card.
 
 All you have to do is review the result and click "Accept".
 
@@ -164,7 +164,7 @@ Hot-reload by mtime — no server restart needed.
    - Description: `GET /api/health → 200 {"status":"ok","ts":...}`
    - Acceptance: `curl localhost:7777/api/health returns 200`
 2. Drag it to **Approved** (or press space on the card).
-3. Within a few seconds the card shows `▶ agent` and Claude moves it to `analyst`. A minute or two later → `testing`.
+3. Within a few seconds the card moves to `in_progress` and shows *writing*, and the agent appears on the sessions strip. A minute or two later → `results`.
 4. Run folder with the prompt, the agent's output and the launcher log: `~/Library/Logs/agent-kanban/runs/T-XXX/`.
 5. If something goes wrong (no login, timeout, the agent quit halfway), the card lands in **Blocked** with the reason in its history.
 
@@ -187,7 +187,7 @@ Hot-reload by mtime — no server restart needed.
 | `claude mcp list` → `Failed to connect` | re-run `python -m kanban_mcp.connect <dir> --project <id>`; by hand: `PYTHONPATH` in `.mcp.json` must point at the agent-kanban root |
 | Card went to **Blocked** with `launcher: …` | the comment says why (not logged in, timeout, agent left the card behind); details in `~/Library/Logs/agent-kanban/runs/T-XXX/` |
 | Card sits in Approved, nothing runs | ⏸ in the top bar is amber → automation is paused; otherwise see `rules.last_errors` in `/api/automation/status` |
-| Agent: "'done' is reserved for a human" | by design — agents stop at `testing`; see `KANBAN_MCP_HUMAN_ONLY` |
+| Agent: "'done' is reserved for a human" | by design — agents stop at `results`; Analysis and Approved are yours too; see `KANBAN_MCP_HUMAN_ONLY` |
 | `C` button in topbar is grey | not logged in — clicking it kicks off the OAuth flow in your browser |
 | Drag-drop works but webhooks are silent | check the syntax of `kanban_data/webhooks.json`; status: `/api/automation/status.webhooks` |
 | Board feels slow, DB is large | `python -m kanban_store.maintenance doctor` |

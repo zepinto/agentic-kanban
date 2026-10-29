@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.3.0 — Mission Board (unreleased, branch `mission-board/m1`)
+
+First release of the **agentic-kanban** fork: the board becomes a shared
+mission board for you and your agents. Database schema v6 (migrates on start).
+
+### Added
+
+- **Column model**: Backlog → Analysis → Approved → In progress → (Testing,
+  folded away) → Results → Done, plus Blocked / Cancelled. Analysis is where a
+  card is refined and gets its worker model; Results is the human review gate.
+- **User stories and proposals**: card `type` (task / story), *as a / I want /
+  so that*, `parent_id` for a story's tasks, `origin` (user / agent) with the
+  proposing session and source card. MCP `task_propose` always files into
+  Backlog.
+- **Worker model per card**: `agent_model` (opus / sonnet / haiku), analysis
+  notes, analyst and rationale; projects get `default_model` and
+  `analyst_model`. Approving a card without a model fills the project default.
+  The launcher runs `claude --model <card model>` and puts the story,
+  acceptance criteria and analysis notes in the prompt.
+- **Sessions**: `sessions` table, REST `/api/sessions`, MCP `session_register`
+  / `session_status`; stdio sessions register themselves from
+  `CLAUDE_CODE_SESSION_ID` and every change is a heartbeat. Sessions strip in
+  the UI.
+- **Messages to agents**: `inputs` table; message a card's agent (bound,
+  live, or proposing session — else queued for whoever claims the card) or a
+  session directly; threaded replies; all in the card history. REST
+  `/api/tasks/{id}/messages`, `/api/sessions/{id}/messages`,
+  `/api/sessions/{id}/inbox`; MCP `inbox_get` (can wait) and `inbox_reply`;
+  `inbox_pending` on every MCP response; `kanban_mcp.hook` for Claude Code
+  `Stop` / `UserPromptSubmit` hooks (installed by the launcher).
+- **Card attention states**: live outline + *writing* while an agent works on a
+  card, *asks you* while it waits for input, *report* in Results, *testing*.
+  Board cards carry `activity`.
+- **UI**: Material 3 design (light / dark, Roboto Flex), Analysis panel with an
+  Opus / Sonnet / Haiku segmented picker, *Approve with &lt;model&gt;*, *To
+  Analysis*, message composer and session message dialog, Proposals filter,
+  toolbar row with sessions and filters.
+
+### Changed
+
+- `kanban_pull` claims `approved → in_progress` (was `analyst`) and binds the
+  card to the session.
+- `KANBAN_MCP_HUMAN_ONLY` defaults to `analysis,approved,done`; agents finish
+  in `results`. Entries are normalised (`uat` → `results`).
+- Rules, PLAN.md headings and status inputs accept the old names: `uat` →
+  results, `analyst` → analysis, `review` → results.
+- The `CLAUDE.md` block written by the connect helper describes the new
+  workflow (`kanban_pull`, `results`, `task_propose`, `session_status`).
+- Default project colour `#0061A4`.
+
+### Removed
+
+- Theme profiles (Standard / Cyberpunk / Horizon) and their fonts.
+
+### Upgrading
+
+Schema v6 maps `analyst` cards to `in_progress` and `uat` to `results`. Re-run
+`python -m kanban_mcp.connect` in connected repos to refresh `CLAUDE.md`.
+
 ## 0.2.0 — 2026-09-25
 
 This release comes from running the board daily with Claude Code agents for

@@ -46,9 +46,11 @@ It writes (or merges into) `~/code/myproj/.mcp.json` and refreshes the "Kanban b
 `KANBAN_DB` — absolute path to the SQLite file (especially important if Claude Code and the kanban live in different directories).
 `KANBAN_PROJECT_ID` — this agent's project: the default for `kanban_create` and the scope of `kanban_list` / `kanban_search` / `kanban_board` / `kanban_my_active` (pass `project_id="*"` to look across projects).
 `KANBAN_ACTOR` — author name written into `task_history` for every move/comment the agent makes (default `claude`), so the history distinguishes agent actions from human drag-drops.
-`KANBAN_MCP_HUMAN_ONLY` — statuses agents may not move or create cards into (default `done`; `uat,done,cancelled` for a stricter board, `""` to allow everything). The agent gets an error telling it to move the card to `testing` instead.
+`KANBAN_MCP_HUMAN_ONLY` — statuses agents may not move or create cards into (default `analysis,approved,done`: refining, approving and accepting are the human's; add `cancelled` for a stricter board, `""` to allow everything). The agent gets an error telling it to finish in `results` and propose new work with `task_propose`.
 
-Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). 16 tools become available:
+Claude Code gives its MCP servers `CLAUDE_CODE_SESSION_ID`; with it the session registers itself on the board's sessions strip on its first change. `KANBAN_AGENT_MODEL` and `KANBAN_STARTED_BY=hub` are set by the launcher.
+
+Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). 21 tools become available:
 
 | Tool | Purpose |
 |---|---|
@@ -57,19 +59,26 @@ Restart Claude Code (or run `claude mcp list` to confirm `✓ Connected`). 16 to
 | `kanban_board` | compact overview of one project (counts + first cards per column) |
 | `kanban_list` | tasks with optional status / assignee / project filters |
 | `kanban_search` | substring search in title/description |
-| `kanban_my_active` | this agent's cards in analyst / in_progress / testing |
+| `kanban_my_active` | this agent's cards in in_progress / testing |
 | `kanban_get` | card with links, blockers and the newest 30 history rows (`history_total` = all) |
 | `kanban_history` | older history, page by page |
-| `kanban_pull` | atomically claim an `approved` task → `analyst`, assignee = current agent |
+| `kanban_pull` | atomically claim an `approved` task → `in_progress`, assignee = current agent, card bound to this session |
 | `kanban_move` | move card to a new column; `expected_from` refuses if someone moved it meanwhile |
 | `kanban_assign` | set or clear the assignee (hand the card to another agent or lane) |
 | `kanban_comment` | append comment to history |
 | `kanban_create` | new card (unknown `project_id` is an error, not a silent default) |
-| `kanban_update` | edit title/priority/size/description/acceptance/external blocker (`""` clears it) |
+| `kanban_update` | edit title/priority/size/description/acceptance/external blocker, user story fields and parent story (`""` clears blocker / parent) |
 | `kanban_link` | attach memory/file/pr/url/plan link |
 | `kanban_blockers` | set/replace inter-task blockers (unknown ids and cycles are rejected) |
+| `task_propose` | propose a task or user story (`type="story"`, `story_as_a/_i_want/_so_that`, `parent_id`); always lands in Backlog marked as the agent's proposal, linked to the card it was working on |
+| `session_register` | name this session on the board (optional under Claude Code) |
+| `session_status` | report `active` / `idle` / `waiting_input` / `finished`, the current card and a one-line note |
+| `inbox_get` | read the human's messages to this session; `wait_seconds` (≤ 60) waits for one |
+| `inbox_reply` | answer a message; the reply is threaded and shows in the card's history |
 
-Mutating tools answer with a short card (`id`, `status`, `url`, …), not the whole history. Arguments are strict: `project=` instead of `project_id=` is an error that names the right parameter, not a silently dropped value. Status names are forgiving: `"In progress"`, `"Testing"` and `"в работе"` all work.
+While messages are unread, every tool response carries `inbox_pending` and a hint to call `inbox_get`. For delivery at turn boundaries, add the message hook (`python -m kanban_mcp.hook`) as a `Stop` and `UserPromptSubmit` hook — see the README, "Messages to agents".
+
+Mutating tools answer with a short card (`id`, `status`, `url`, …), not the whole history. Arguments are strict: `project=` instead of `project_id=` is an error that names the right parameter, not a silently dropped value. Status names are forgiving: `"In progress"`, `"Results"`, `"в работе"` and the pre-v0.3 names (`uat` → results, `analyst` → analysis) all work.
 
 Changes made over MCP reach automation rules and webhooks the same way UI drag-drops do: every change lands in `task_history`, and the web server's event feed dispatches it within about a second (the web server has to be running for that part).
 

@@ -1,7 +1,7 @@
 [project]
-name = "agent-kanban"
-version = "0.2.0"
-description = "Local-first kanban for AI-agent workflows. SQLite, FastAPI, no auth, no cloud."
+name = "agentic-kanban"
+version = "0.3.0"
+description = "Mission Board: a local-first kanban where you and your AI agents share the backlog — MCP, sessions, messages, per-card models."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
