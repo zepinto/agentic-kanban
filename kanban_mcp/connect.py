@@ -64,7 +64,7 @@ def server_entry(project_id: str, *, db: Path, actor: str = "claude") -> dict[st
 
 def write_mcp_json(
     project_dir: Path, project_id: str, *, db: Path, alias: str | None = None,
-    actor: str | None = None, dry_run: bool = False,
+    actor: str | None = None, channel: bool | None = None, dry_run: bool = False,
 ) -> tuple[Path, str, dict[str, Any]]:
     """Merge the kanban server into ``.mcp.json``. Returns (path, alias, config).
 
@@ -73,6 +73,7 @@ def write_mcp_json(
     ``KANBAN_PROJECT_ID``) is rewritten. Other keys — ``KANBAN_MCP_HUMAN_ONLY``,
     ``KANBAN_URL``, custom env, ``KANBAN_ACTOR`` unless ``actor`` is given —
     are kept, so re-running connect never loosens a setting someone made.
+    ``channel`` True/False sets or removes ``KANBAN_MCP_CHANNEL``; None keeps it.
     """
     f = project_dir / ".mcp.json"
     data: dict[str, Any] = {}
@@ -98,6 +99,11 @@ def write_mcp_json(
         servers[name] = merged
     else:
         servers[name] = fresh
+    env = servers[name].setdefault("env", {})
+    if channel:
+        env["KANBAN_MCP_CHANNEL"] = "1"
+    elif channel is False:
+        env.pop("KANBAN_MCP_CHANNEL", None)
     if not dry_run:
         f.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return f, name, data
@@ -105,7 +111,8 @@ def write_mcp_json(
 
 def connect(
     project_dir: Path, project_id: str, *, db: Path | None = None, alias: str | None = None,
-    actor: str | None = None, claude_md: bool = True, dry_run: bool = False,
+    actor: str | None = None, claude_md: bool = True, channel: bool | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     from kanban_store import Store
     from kanban_store.store import _default_db_path
@@ -125,10 +132,13 @@ def connect(
     finally:
         store.close()
     mcp_file, name, _cfg = write_mcp_json(
-        project_dir, project_id, db=db, alias=alias, actor=actor, dry_run=dry_run
+        project_dir, project_id, db=db, alias=alias, actor=actor, channel=channel,
+        dry_run=dry_run,
     )
     result: dict[str, Any] = {"mcp_json": str(mcp_file), "alias": name, "db": str(db),
-                              "project_id": project_id, "dry_run": dry_run}
+                              "project_id": project_id, "dry_run": dry_run,
+                              "channel": bool(_cfg["mcpServers"][name].get("env", {})
+                                              .get("KANBAN_MCP_CHANNEL"))}
     if claude_md:
         cfg = src.get("config") or {}
         plan_files = cfg.get("files") or ([cfg["file"]] if cfg.get("file") else [])
@@ -156,12 +166,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="name written to history (default: keep existing, else claude)")
     ap.add_argument("--db", type=Path, default=None, help="SQLite file (default: KANBAN_DB)")
     ap.add_argument("--no-claude-md", action="store_true", help="leave CLAUDE.md alone")
+    ch = ap.add_mutually_exclusive_group()
+    ch.add_argument("--channel", dest="channel", action="store_true", default=None,
+                    help="push board messages into the session (Claude Code channels)")
+    ch.add_argument("--no-channel", dest="channel", action="store_false")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
     try:
         out = connect(
             args.project_dir, args.project, db=args.db, alias=args.alias, actor=args.actor,
-            claude_md=not args.no_claude_md, dry_run=args.dry_run,
+            claude_md=not args.no_claude_md, channel=args.channel, dry_run=args.dry_run,
         )
     except (ValueError, FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
@@ -170,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         print(f"\nNext: restart Claude Code in {args.project_dir} (or run `claude mcp list`) "
               f"and approve the '{out['alias']}' server when asked.", file=sys.stderr)
+        if out["channel"]:
+            print(f"Channel push is on: start with `claude --dangerously-load-development-channels "
+                  f"server:{out['alias']}` to receive board messages live.", file=sys.stderr)
     return 0
 
 

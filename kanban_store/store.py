@@ -1674,17 +1674,19 @@ class Store(ReportsMixin):
             ).fetchall()
             msgs = [self._row_to_input(r) for r in rows]
             if mark_delivered and msgs:
-                ids = [m.id for m in msgs]
-                ph = ",".join("?" * len(ids))
-                self._conn.execute(
-                    f"UPDATE inputs SET delivered_at=?, session_id=COALESCE(session_id, ?) "
-                    f"WHERE id IN ({ph})",
-                    (ts, session_id, *ids),
-                )
+                self._mark_delivered([m.id for m in msgs], session_id, ts)
                 for m in msgs:
                     m.delivered_at = ts
                     m.session_id = m.session_id or session_id
         return msgs
+
+    def _mark_delivered(self, ids: list[int], session_id: str, ts: str) -> None:
+        ph = ",".join("?" * len(ids))
+        self._conn.execute(
+            f"UPDATE inputs SET delivered_at=COALESCE(delivered_at, ?), "
+            f"session_id=COALESCE(session_id, ?) WHERE id IN ({ph})",
+            (ts, session_id, *ids),
+        )
 
     @staticmethod
     def _held_tasks_sql() -> str:

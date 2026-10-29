@@ -38,6 +38,12 @@ Environment:
 * ``KANBAN_AGENT_MODEL`` / ``KANBAN_STARTED_BY`` — what the launcher started
   this session with (``opus``/``sonnet``/``haiku``; ``hub``), shown on the
   sessions strip.
+* ``KANBAN_MCP_CHANNEL=1`` — push the human's messages into the session as
+  Claude Code channel events (start ``claude`` with
+  ``--dangerously-load-development-channels server:<name>``); see
+  ``kanban_mcp/channel.py``. ``KANBAN_CHANNEL_FROM`` (``human``/``any``),
+  ``KANBAN_CHANNEL_POLL`` (seconds, default 2) and ``KANBAN_SESSION_ID``
+  (session id when Claude Code gives none) tune it.
 
 Tool arguments are strict: an unknown argument name (``project`` instead of
 ``project_id``, ``body`` instead of ``description``) is an error with a
@@ -1086,6 +1092,14 @@ _make_arguments_strict(mcp)
 
 
 def main() -> None:
+    from kanban_mcp import channel
+
+    if channel.enabled():
+        import anyio
+
+        anyio.run(lambda: channel.serve(mcp, get_store=_get_store, session=_session,
+                                        heartbeat=_heartbeat))
+        return
     mcp.run()
 
 
