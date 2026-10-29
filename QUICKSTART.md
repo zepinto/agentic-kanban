@@ -3,6 +3,14 @@
 End-to-end path: clone → run → AI agent picks up an Approved task on its own.
 If you don't need AI, skip Part 2 and use it as a regular kanban board.
 
+> **Shortcut:** one command does Parts 1 and 2 for a repo:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/zepinto/agentic-kanban/main/scripts/setup.sh | bash -s -- ~/code/myapp --agents
+> ```
+>
+> See [README → Quickstart](README.md#quickstart) for its options.
+
 ## Part 1 — Basic kanban (2 minutes)
 
 ### Requirements

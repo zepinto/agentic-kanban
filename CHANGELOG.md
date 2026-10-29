@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 — Mission Board (unreleased, branch `mission-board/m1`)
+## 0.3.0 — Mission Board (2026-10-29)
 
 First release of the **agentic-kanban** fork: the board becomes a shared
 mission board for you and your agents. Database schema v6 (migrates on start).
@@ -59,6 +59,9 @@ mission board for you and your agents. Database schema v6 (migrates on start).
   delivered into live sessions as Claude Code channel events
   (`notifications/claude/channel`); pushed messages stay unread until
   answered, so nothing is lost when the client drops them.
+- **One-line setup**: `scripts/setup.sh` (`curl … | bash -s -- ~/code/myapp
+  --agents`) installs, creates and connects the project, adds the message hook
+  and, optionally, the launcher rules, then starts the board.
 - **Card attention states**: live outline + *writing* while an agent works on a
   card, *asks you* while it waits for input, *report* in Results, *testing*.
   Board cards carry `activity`.

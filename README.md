@@ -92,7 +92,27 @@ By default agents may not move cards into **Analysis, Approved or Done**
 
 ## Quickstart
 
-Requirements: Python 3.12+, macOS or Linux (Windows via WSL2), and
+**One line** — install into `~/agentic-kanban`, connect your repo, start the board:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zepinto/agentic-kanban/main/scripts/setup.sh | bash -s -- ~/code/myapp --agents
+```
+
+[`scripts/setup.sh`](scripts/setup.sh) clones the board (or updates an existing
+checkout), installs uv if it is missing, installs the dependencies and downloads Mermaid
+and Plotly.js. It then creates a project for `~/code/myapp` (the id comes from the folder
+name), connects the repo (`.mcp.json`, `CLAUDE.md`) and adds the message hook to the
+repo's `.claude/settings.json`. Finally it starts the board on http://localhost:7777.
+`--agents` adds the three launcher rules (worker on approval, analyst, resume on
+message); leave it out to drive Claude Code yourself. Other options: `--project SLUG`,
+`--model opus|sonnet|haiku`, `--analyst-model …`, `--channel`, `--dir PATH`,
+`--port N`, `--no-hooks`, `--no-vendor`, `--no-start`. With no repo it only installs and
+starts the board. Re-running it is safe: nothing is added twice.
+
+To connect another repo later, run it again with that repo and `--no-start` (the board
+keeps running), or use the connect helper below.
+
+**By hand.** Requirements: Python 3.12+, macOS or Linux (Windows via WSL2), and
 [uv](https://docs.astral.sh/uv/) (`curl -LsSf https://astral.sh/uv/install.sh | sh`).
 
 ```bash
@@ -244,12 +264,14 @@ How the agent receives them:
 
    ```json
    {"hooks": {
-     "Stop":             [{"hooks": [{"type": "command", "command": "/path/to/agentic-kanban/.venv/bin/python -m kanban_mcp.hook"}]}],
-     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/path/to/agentic-kanban/.venv/bin/python -m kanban_mcp.hook"}]}]
+     "Stop":             [{"hooks": [{"type": "command", "command": "KANBAN_DB=/path/to/agentic-kanban/tasks.db PYTHONPATH=/path/to/agentic-kanban /path/to/agentic-kanban/.venv/bin/python -m kanban_mcp.hook"}]}],
+     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "KANBAN_DB=/path/to/agentic-kanban/tasks.db PYTHONPATH=/path/to/agentic-kanban /path/to/agentic-kanban/.venv/bin/python -m kanban_mcp.hook"}]}]
    }}
    ```
 
+   `PYTHONPATH` is needed because the hook runs in your repo, not in the board's folder.
    The hook reads `KANBAN_DB` when set, else asks the board at `KANBAN_URL`.
+   `scripts/setup.sh` writes this for you.
 3. **Waiting for an answer** — an agent that asked you something calls
    `session_status(status="waiting_input")` and `inbox_get(wait_seconds=60)`.
 4. **Channel push** (Claude Code channels, research preview) — with
@@ -438,7 +460,7 @@ agentic-kanban/
 │   └── static/      index.html · styles.css (Material 3) · app.js · reports.js · vendor/
 ├── examples/        agent-launcher (claude -p on approval), llm-tool-calling demos
 ├── docs/            INTEGRATION.md, USECASES.md, openapi.yaml, screenshots
-├── scripts/         vendor_libs.sh (Mermaid + Plotly.js for offline use)
+├── scripts/         setup.sh (one-line install + connect), vendor_libs.sh (Mermaid + Plotly.js offline)
 ├── seed/            example tasks
 ├── tests/           pytest suite
 └── kanban_data/     runtime: inbox/, rules.json, webhooks.json, logs (gitignored)
