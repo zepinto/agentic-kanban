@@ -241,7 +241,8 @@ async def test_webhooks_get_compact_payload(store, tmp_path, monkeypatch):
     moved = [p for e, p in sent if e == "task_moved"][0]
     assert (moved["from_status"], moved["to_status"], moved["actor"]) == ("backlog", "approved", "claude")
     assert len(moved["task"]["history"]) <= events_mod.HISTORY_IN_PAYLOAD
-    assert moved["task"]["history_total"] == 33
+    # +1: moving to approved fills the worker model from the project default
+    assert moved["task"]["history_total"] == 34
 
 
 @pytest.mark.asyncio

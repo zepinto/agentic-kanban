@@ -38,18 +38,39 @@ from typing import Any, Iterable
 # Status model
 # ============================================================================
 
-# 9 columns in left-to-right UI order.
+# 9 columns in left-to-right UI order (Mission Board workflow):
+#   backlog → analysis → approved → in_progress → (testing) → results → done
+# plus blocked / cancelled. ``analysis`` is where a card is refined (by the
+# human or an analyst agent) and gets its worker model; ``results`` is the
+# human review gate an agent reaches by posting its final result. ``testing``
+# is kept for projects that want it but is hidden in the UI by default.
+# Schema v6 renamed the old ``analyst`` (agent claimed the card) to
+# ``in_progress`` and ``uat`` to ``results``.
 STATUSES: list[str] = [
     "backlog",
+    "analysis",
     "approved",
-    "analyst",
     "in_progress",
     "testing",
-    "uat",
+    "results",
     "done",
     "blocked",
     "cancelled",
 ]
+
+# Worker models a card can be assigned to (Claude Code ``--model`` aliases).
+AGENT_MODELS: tuple[str, ...] = ("opus", "sonnet", "haiku")
+DEFAULT_AGENT_MODEL = os.environ.get("KANBAN_DEFAULT_MODEL", "sonnet").strip().lower() or "sonnet"
+
+# Card types: a plain task, or a user story (as a / I want / so that).
+TASK_TYPES: tuple[str, ...] = ("task", "story")
+
+# Who created the card. Agent proposals always land in the backlog.
+ORIGINS: tuple[str, ...] = ("user", "agent")
+
+# States an agent session reports about itself. "offline" is never stored:
+# it is derived from a stale heartbeat (see Store.list_sessions).
+SESSION_STATUSES: tuple[str, ...] = ("active", "idle", "waiting_input", "finished")
 
 # Link types accepted by add_link / create_task(links=...).
 # ``plan`` — a planning document (e.g. a Claude Code plan-mode file).
@@ -65,11 +86,14 @@ SIZES: tuple[str, ...] = ("S", "M", "L", "XL")
 _STATUS_ALIASES: dict[str, str] = {
     "todo": "backlog", "бэклог": "backlog",
     "согласовано": "approved",
-    "analysis": "analyst", "analytics": "analyst", "аналитика": "analyst",
+    "analyst": "analysis", "analytics": "analysis", "аналитика": "analysis",
+    "refine": "analysis", "refinement": "analysis",
     "inprogress": "in_progress", "wip": "in_progress", "doing": "in_progress",
     "в_работе": "in_progress",
-    "review": "testing", "qa": "testing", "тестирование": "testing",
-    "acceptance": "uat", "приёмка": "uat", "приемка": "uat",
+    "qa": "testing", "тестирование": "testing",
+    # pre-v6 name of the review column, kept so old rules and scripts work
+    "uat": "results", "result": "results", "review": "results",
+    "acceptance": "results", "приёмка": "results", "приемка": "results",
     "closed": "done", "закрыто": "done",
     "заблокировано": "blocked",
     "canceled": "cancelled", "отменено": "cancelled",
@@ -108,18 +132,56 @@ def normalize_size(value: str) -> str:
     raise ValueError(f"unknown size: {value!r}; valid: {', '.join(SIZES)}")
 
 
-def status_meta() -> list[dict[str, str]]:
-    """Column metadata for the UI (label + cssClass)."""
+def normalize_choice(value: str | None, choices: tuple[str, ...], what: str) -> str:
+    key = str(value if value is not None else "").strip().lower()
+    if key in choices:
+        return key
+    raise ValueError(f"unknown {what}: {value!r}; valid: {', '.join(choices)}")
+
+
+def normalize_model(value: str | None) -> str | None:
+    """``"Opus"`` → ``"opus"``; ``""``/``None`` → ``None`` (no model set).
+
+    Full model ids are accepted by family name (``claude-sonnet-5-5`` →
+    ``sonnet``) so a card stays readable on the board.
+    """
+    raw = str(value if value is not None else "").strip().lower()
+    if not raw:
+        return None
+    if raw in AGENT_MODELS:
+        return raw
+    for m in AGENT_MODELS:
+        if m in raw:
+            return m
+    raise ValueError(f"unknown agent model: {value!r}; valid: {', '.join(AGENT_MODELS)}")
+
+
+def status_meta() -> list[dict[str, Any]]:
+    """Column metadata for the UI and for agents (``kanban_columns``).
+
+    ``owner`` is who normally moves cards into the column; ``hidden``
+    columns are kept but collapsed out of the default board.
+    """
     return [
-        {"id": "backlog",     "title": "Backlog",      "owner": "user"},
-        {"id": "approved",    "title": "Approved",     "owner": "agent"},
-        {"id": "analyst",     "title": "Analyst",      "owner": "agent"},
-        {"id": "in_progress", "title": "In progress",  "owner": "agent"},
-        {"id": "testing",     "title": "Testing",      "owner": "agent"},
-        {"id": "uat",         "title": "UAT",          "owner": "user"},
-        {"id": "done",        "title": "Done",         "owner": "user"},
-        {"id": "blocked",     "title": "Blocked",      "owner": "any"},
-        {"id": "cancelled",   "title": "Cancelled",    "owner": "user"},
+        {"id": "backlog",     "title": "Backlog",     "owner": "any",
+         "hint": "new entries from you, and tasks or stories proposed by agents"},
+        {"id": "analysis",    "title": "Analysis",    "owner": "user",
+         "hint": "refine scope, story and acceptance criteria; pick the worker model "
+                 "(you, or an analyst agent)"},
+        {"id": "approved",    "title": "Approved",    "owner": "user",
+         "hint": "queue: an agent on the card's model is started for each card here"},
+        {"id": "in_progress", "title": "In progress", "owner": "agent",
+         "hint": "an agent is working on the card"},
+        {"id": "testing",     "title": "Testing",     "owner": "agent", "hidden": True,
+         "hint": "optional verification step"},
+        {"id": "results",     "title": "Results",     "owner": "agent",
+         "hint": "the agent's final result, waiting for your review"},
+        {"id": "done",        "title": "Done",        "owner": "user",
+         "hint": "accepted"},
+        {"id": "blocked",     "title": "Blocked",     "owner": "any",
+         "hint": "waiting on a question or a dependency"},
+        {"id": "cancelled",   "title": "Cancelled",   "owner": "user",
+         "hint": "dropped"},
     ]
 
 
@@ -156,6 +218,21 @@ class Task:
     column_order: int
     project_id: str = DEFAULT_PROJECT_ID
     archived_at: str | None = None
+    # --- Mission Board (schema v6) ---
+    type: str = "task"                       # task | story
+    story_as_a: str = ""
+    story_i_want: str = ""
+    story_so_that: str = ""
+    parent_id: str | None = None             # a story's tasks point at it
+    origin: str = "user"                     # user | agent
+    origin_session_id: str | None = None     # agent session that proposed it
+    origin_task_id: str | None = None        # card the agent was working on
+    agent_model: str | None = None           # opus | sonnet | haiku
+    analysis_md: str = ""                    # analysis notes for the agent's brief
+    analysed_by: str | None = None           # user / agent session that did the analysis
+    model_rationale: str = ""                # why this model (analyst agent)
+    assigned_session_id: str | None = None   # worker session bound to the card
+    run_count: int = 0
     links: list[dict[str, str]] = field(default_factory=list)
     history: list[TaskHistory] = field(default_factory=list)
     # Total number of history rows; ``history`` may hold only the newest ones.
@@ -178,8 +255,30 @@ class Project:
     archived: bool
     created_at: str
     path: str | None = None
+    default_model: str = DEFAULT_AGENT_MODEL  # prefills a card's worker model
+    analyst_model: str = DEFAULT_AGENT_MODEL  # model the analyst agent runs on
     task_counts: dict[str, int] = field(default_factory=dict)
     total_tasks: int = 0
+
+    def to_public(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Session:
+    """An agent session (a Claude Code process) known to the board."""
+    id: str
+    agent_name: str
+    machine: str
+    repo: str
+    project_id: str | None
+    model: str | None
+    status: str                    # active / idle / waiting_input / finished / offline
+    current_task_id: str | None
+    note: str
+    started_by: str                # hub (started by the board) | manual
+    started_at: str
+    last_heartbeat: str
 
     def to_public(self) -> dict[str, Any]:
         return asdict(self)
@@ -280,12 +379,60 @@ class Store:
             self._migrate_v3()
             self._migrate_v4()
             self._migrate_v5()
+            self._migrate_v6()
 
     def _schema_version(self) -> int:
         row = self._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         return int(row["value"]) if row else 1
+
+    # Columns added to tasks / projects in v6, with their SQL definitions.
+    _V6_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("type", "TEXT NOT NULL DEFAULT 'task'"),
+        ("story_as_a", "TEXT NOT NULL DEFAULT ''"),
+        ("story_i_want", "TEXT NOT NULL DEFAULT ''"),
+        ("story_so_that", "TEXT NOT NULL DEFAULT ''"),
+        ("parent_id", "TEXT"),
+        ("origin", "TEXT NOT NULL DEFAULT 'user'"),
+        ("origin_session_id", "TEXT"),
+        ("origin_task_id", "TEXT"),
+        ("agent_model", "TEXT"),
+        ("analysis_md", "TEXT NOT NULL DEFAULT ''"),
+        ("analysed_by", "TEXT"),
+        ("model_rationale", "TEXT NOT NULL DEFAULT ''"),
+        ("assigned_session_id", "TEXT"),
+        ("run_count", "INTEGER NOT NULL DEFAULT 0"),
+    )
+    _V6_PROJECT_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("default_model", f"TEXT NOT NULL DEFAULT '{DEFAULT_AGENT_MODEL}'"),
+        ("analyst_model", f"TEXT NOT NULL DEFAULT '{DEFAULT_AGENT_MODEL}'"),
+    )
+
+    def _migrate_v6(self) -> None:
+        """v5 → v6 (Mission Board): story / analysis / model fields on tasks,
+        model defaults on projects, the sessions table (schema.sql), and the
+        new column model — ``analyst`` cards (claimed by an agent) become
+        ``in_progress``, ``uat`` becomes ``results``."""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        for name, ddl in self._V6_TASK_COLUMNS:
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
+        pcols = {r[1] for r in self._conn.execute("PRAGMA table_info(projects)").fetchall()}
+        for name, ddl in self._V6_PROJECT_COLUMNS:
+            if name not in pcols:
+                self._conn.execute(f"ALTER TABLE projects ADD COLUMN {name} {ddl}")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id)")
+        if self._schema_version() < 6:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute("UPDATE tasks SET status='in_progress' WHERE status='analyst'")
+                self._conn.execute("UPDATE tasks SET status='results' WHERE status='uat'")
+                self._conn.execute("UPDATE meta SET value='6' WHERE key='schema_version'")
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def _migrate_v5(self) -> None:
         """v4 → v5: tasks.archived_at (rule_firings comes from schema.sql)."""
@@ -503,10 +650,25 @@ class Store:
         links: list[dict[str, str]] | None = None,
         task_id: str | None = None,
         project_id: str = DEFAULT_PROJECT_ID,
+        type: str = "task",
+        story_as_a: str = "",
+        story_i_want: str = "",
+        story_so_that: str = "",
+        parent_id: str | None = None,
+        origin: str = "user",
+        origin_session_id: str | None = None,
+        origin_task_id: str | None = None,
+        agent_model: str | None = None,
+        analysis_md: str = "",
     ) -> Task:
         status = normalize_status(status)
         priority = normalize_priority(priority)
         size = normalize_size(size)
+        type_ = normalize_choice(type, TASK_TYPES, "task type")
+        origin = normalize_choice(origin, ORIGINS, "origin")
+        agent_model = normalize_model(agent_model)
+        parent_id = (parent_id or "").strip() or None
+        origin_task_id = (origin_task_id or "").strip() or None
         if not title or not title.strip():
             raise ValueError("title must not be empty")
         link_pairs = normalize_links(links)
@@ -515,6 +677,9 @@ class Store:
             if self.get_project(project_id) is None:
                 known = ", ".join(p.id for p in self.list_projects(include_archived=True))
                 raise ValueError(f"unknown project: {project_id} (known: {known})")
+            for ref, what in ((parent_id, "parent"), (origin_task_id, "origin task")):
+                if ref is not None and not self._task_exists(ref):
+                    raise ValueError(f"unknown {what}: {ref}")
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 tid = task_id or self._next_id()
@@ -529,8 +694,12 @@ class Store:
                     """
                     INSERT INTO tasks (id, title, status, priority, size, assignee,
                                         description, acceptance, external_blocker,
-                                        created_at, moved_at, column_order, project_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        created_at, moved_at, column_order, project_id,
+                                        type, story_as_a, story_i_want, story_so_that,
+                                        parent_id, origin, origin_session_id,
+                                        origin_task_id, agent_model, analysis_md)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         tid,
@@ -546,6 +715,16 @@ class Store:
                         ts,
                         col_order,
                         project_id,
+                        type_,
+                        story_as_a.strip(),
+                        story_i_want.strip(),
+                        story_so_that.strip(),
+                        parent_id,
+                        origin,
+                        (origin_session_id or "").strip() or None,
+                        origin_task_id,
+                        agent_model,
+                        analysis_md,
                     ),
                 )
                 for type_, value in link_pairs:
@@ -553,7 +732,14 @@ class Store:
                         "INSERT OR IGNORE INTO task_links (task_id, type, value) VALUES (?, ?, ?)",
                         (tid, type_, value),
                     )
-                self._insert_history(tid, ts, actor, "create", None, status, None)
+                note = None
+                if origin == "agent":
+                    note = "proposed by an agent" + (
+                        f" while working on {origin_task_id}" if origin_task_id else ""
+                    )
+                self._insert_history(tid, ts, actor, "create", None, status, note)
+                if status == "approved":
+                    self._ensure_agent_model(tid, project_id, ts, actor)
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -628,6 +814,8 @@ class Store:
                     self._insert_history(
                         task_id, ts, actor, "move", from_status, to_status, comment
                     )
+                    if to_status == "approved":
+                        self._ensure_agent_model(task_id, project_id, ts, actor)
                     if from_status == "blocked" and not is_machine_actor(actor):
                         # A person unblocking the card is the "try again"
                         # signal: fresh max_runs budget for run_command rules.
@@ -641,6 +829,25 @@ class Store:
         task = self.get_task(task_id, history_limit=0)
         assert task is not None
         return task
+
+    def _ensure_agent_model(self, task_id: str, project_id: str, ts: str, actor: str) -> None:
+        """An approved card always names its worker model: if none was picked
+        in Analysis, the project default fills it (and history says so).
+        Runs inside the caller's transaction."""
+        row = self._conn.execute(
+            "SELECT agent_model FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if row is None or row["agent_model"]:
+            return
+        prow = self._conn.execute(
+            "SELECT default_model FROM projects WHERE id=?", (project_id,)
+        ).fetchone()
+        model = normalize_model(prow["default_model"] if prow else None) or DEFAULT_AGENT_MODEL
+        self._conn.execute("UPDATE tasks SET agent_model=? WHERE id=?", (model, task_id))
+        self._insert_history(
+            task_id, ts, actor, "update", None, None,
+            f"agent_model: — → {model} (project default)",
+        )
 
     def _place_in_column(
         self, task_id: str, project_id: str, status: str, index: int
@@ -688,10 +895,14 @@ class Store:
         assert t is not None
         return t
 
-    def pull_task(self, task_id: str, assignee: str = "claude") -> Task:
-        """Atomic: assignee IS NULL → assignee, status approved → analyst.
+    def pull_task(
+        self, task_id: str, assignee: str = "claude", *, session_id: str | None = None,
+    ) -> Task:
+        """Atomic: assignee IS NULL → assignee, status approved → in_progress.
 
         Used by Claude/an agent for a safe "claim the task" operation.
+        ``session_id`` binds the card to the claiming agent session, so later
+        comments on the card can be routed to it.
         """
         ts = _now()
         with self._lock:
@@ -710,19 +921,30 @@ class Store:
                     raise RuntimeError(
                         f"task {task_id} is in '{row['status']}', not 'approved'"
                     )
-                # move to analyst and claim (per project)
+                # move to in_progress and claim (per project)
                 r2 = self._conn.execute(
                     "SELECT COALESCE(MAX(column_order), -1) AS m FROM tasks "
-                    "WHERE status='analyst' AND project_id=?",
+                    "WHERE status='in_progress' AND project_id=?",
                     (row["project_id"],),
                 ).fetchone()
                 col_order = (r2["m"] + 1) if r2 else 0
+                sid = (session_id or "").strip() or None
                 self._conn.execute(
-                    """UPDATE tasks SET status='analyst', assignee=?, moved_at=?, column_order=?
+                    """UPDATE tasks SET status='in_progress', assignee=?, moved_at=?,
+                              column_order=?, run_count=run_count+1,
+                              assigned_session_id=COALESCE(?, assigned_session_id)
                        WHERE id=?""",
-                    (assignee, ts, col_order, task_id),
+                    (assignee, ts, col_order, sid, task_id),
                 )
-                self._insert_history(task_id, ts, assignee, "move", "approved", "analyst", "pulled")
+                self._insert_history(
+                    task_id, ts, assignee, "move", "approved", "in_progress", "pulled"
+                )
+                if sid:
+                    self._conn.execute(
+                        "UPDATE sessions SET current_task_id=?, status='active', "
+                        "last_heartbeat=? WHERE id=?",
+                        (task_id, ts, sid),
+                    )
                 self._conn.execute("COMMIT")
             except Exception:
                 self._conn.execute("ROLLBACK")
@@ -823,7 +1045,9 @@ class Store:
         return None
 
     # Fields whose old → new values are short enough to show in history.
-    _SHOW_VALUES = ("priority", "size")
+    _SHOW_VALUES = ("priority", "size", "type", "agent_model")
+    # Nullable text fields where "" means "clear" (stored as NULL).
+    _NULLABLE = ("external_blocker", "agent_model", "parent_id", "analysed_by")
 
     def update_fields(
         self,
@@ -836,13 +1060,23 @@ class Store:
         description: str | None = None,
         acceptance: str | None = None,
         external_blocker: str | None = None,
+        type: str | None = None,
+        story_as_a: str | None = None,
+        story_i_want: str | None = None,
+        story_so_that: str | None = None,
+        parent_id: str | None = None,
+        agent_model: str | None = None,
+        analysis_md: str | None = None,
+        analysed_by: str | None = None,
+        model_rationale: str | None = None,
     ) -> Task:
         """Update the given fields (``None`` = leave alone).
 
         Only fields whose value actually changes are written, and the
         history row lists just those (``priority: normal → high; title``).
-        ``external_blocker=""`` clears the external blocker. A call that
-        changes nothing writes nothing.
+        ``external_blocker=""`` clears the external blocker (likewise
+        ``agent_model``, ``parent_id``, ``analysed_by``). A call that changes
+        nothing writes nothing.
         """
         requested = {
             "title": title.strip() if isinstance(title, str) else None,
@@ -851,6 +1085,15 @@ class Store:
             "description": description,
             "acceptance": acceptance,
             "external_blocker": external_blocker,
+            "type": type,
+            "story_as_a": story_as_a,
+            "story_i_want": story_i_want,
+            "story_so_that": story_so_that,
+            "parent_id": parent_id,
+            "agent_model": agent_model,
+            "analysis_md": analysis_md,
+            "analysed_by": analysed_by,
+            "model_rationale": model_rationale,
         }
         if requested["title"] == "":
             raise ValueError("title must not be empty")
@@ -858,6 +1101,18 @@ class Store:
             requested["priority"] = normalize_priority(requested["priority"])
         if requested["size"] is not None:
             requested["size"] = normalize_size(requested["size"])
+        if requested["type"] is not None:
+            requested["type"] = normalize_choice(requested["type"], TASK_TYPES, "task type")
+        if requested["agent_model"] is not None:
+            # "" clears; anything else must name a known model
+            requested["agent_model"] = normalize_model(requested["agent_model"]) or ""
+        pid = (requested["parent_id"] or "").strip()
+        if pid:
+            if pid == task_id:
+                raise ValueError(f"{task_id} cannot be its own parent")
+            with self._lock:
+                if not self._task_exists(pid):
+                    raise ValueError(f"unknown parent: {pid}")
         ts = _now()
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -873,8 +1128,10 @@ class Store:
                 for col, val in requested.items():
                     if val is None:
                         continue
-                    if col == "external_blocker":
+                    if col in self._NULLABLE:
                         val = val.strip() or None
+                    if col in ("story_as_a", "story_i_want", "story_so_that"):
+                        val = val.strip()
                     if row[col] == val:
                         continue
                     sets.append(f"{col} = ?")
@@ -1035,6 +1292,161 @@ class Store:
         return [{**dict(r), "ctx": json.loads(r["ctx"])} for r in rows]
 
     # ------------------------------------------------------------------
+    # Agent sessions
+    # ------------------------------------------------------------------
+
+    # A session that has not been heard from for this long shows as offline.
+    SESSION_OFFLINE_AFTER_S = int(os.environ.get("KANBAN_SESSION_OFFLINE_AFTER", "900"))
+
+    def register_session(
+        self,
+        session_id: str,
+        agent_name: str,
+        *,
+        machine: str = "",
+        repo: str = "",
+        project_id: str | None = None,
+        model: str | None = None,
+        started_by: str = "manual",
+        current_task_id: str | None = None,
+    ) -> Session:
+        """Create or refresh a session. Re-registering an existing id (a
+        resumed Claude Code session) keeps its ``started_at``."""
+        session_id = (session_id or "").strip()
+        agent_name = (agent_name or "").strip()
+        if not session_id:
+            raise ValueError("session_id must not be empty")
+        if not agent_name:
+            raise ValueError("agent_name must not be empty")
+        if started_by not in ("hub", "manual"):
+            raise ValueError("started_by must be 'hub' or 'manual'")
+        model = normalize_model(model)
+        project_id = (project_id or "").strip() or None
+        current_task_id = (current_task_id or "").strip() or None
+        ts = _now()
+        with self._lock:
+            if project_id is not None and self.get_project(project_id) is None:
+                raise ValueError(f"unknown project: {project_id}")
+            if current_task_id is not None and not self._task_exists(current_task_id):
+                raise ValueError(f"unknown task: {current_task_id}")
+            self._conn.execute(
+                """INSERT INTO sessions (id, agent_name, machine, repo, project_id, model,
+                                         status, current_task_id, note, started_by,
+                                         started_at, last_heartbeat)
+                   VALUES (?, ?, ?, ?, ?, ?, 'active', ?, '', ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     agent_name=excluded.agent_name, machine=excluded.machine,
+                     repo=excluded.repo,
+                     project_id=COALESCE(excluded.project_id, sessions.project_id),
+                     model=COALESCE(excluded.model, sessions.model),
+                     current_task_id=COALESCE(excluded.current_task_id, sessions.current_task_id),
+                     status='active', last_heartbeat=excluded.last_heartbeat""",
+                (session_id, agent_name, machine.strip(), repo.strip(), project_id, model,
+                 current_task_id, started_by, ts, ts),
+            )
+        s = self.get_session(session_id)
+        assert s is not None
+        return s
+
+    def touch_session(
+        self,
+        session_id: str,
+        *,
+        status: str | None = None,
+        task_id: str | None = None,
+        note: str | None = None,
+    ) -> Session:
+        """Heartbeat, optionally with a new status / current card / note.
+        ``task_id=""`` clears the current card. Raises ``KeyError`` for an
+        unknown session."""
+        sets = ["last_heartbeat = ?"]
+        params: list[Any] = [_now()]
+        if status is not None:
+            sets.append("status = ?")
+            params.append(normalize_choice(status, SESSION_STATUSES, "session status"))
+        if note is not None:
+            sets.append("note = ?")
+            params.append(note.strip()[:500])
+        with self._lock:
+            if task_id is not None:
+                tid = task_id.strip() or None
+                if tid is not None and not self._task_exists(tid):
+                    raise ValueError(f"unknown task: {tid}")
+                sets.append("current_task_id = ?")
+                params.append(tid)
+            params.append(session_id)
+            cur = self._conn.execute(
+                f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?", params
+            )
+            if cur.rowcount == 0:
+                raise KeyError(session_id)
+        s = self.get_session(session_id)
+        assert s is not None
+        return s
+
+    def get_session(self, session_id: str) -> Session | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM sessions WHERE id=?", (session_id,)
+            ).fetchone()
+        return self._row_to_session(row) if row else None
+
+    def list_sessions(
+        self,
+        *,
+        project_id: str | None = None,
+        include_finished: bool = False,
+        max_age_s: int | None = 86400,
+    ) -> list[Session]:
+        """Sessions, most recently heard from first. Sessions silent for more
+        than ``SESSION_OFFLINE_AFTER_S`` report status ``offline``; those
+        silent longer than ``max_age_s`` (default a day) are left out."""
+        sql = "SELECT * FROM sessions WHERE 1=1"
+        params: list[Any] = []
+        if project_id is not None:
+            sql += " AND project_id = ?"
+            params.append(project_id)
+        if not include_finished:
+            sql += " AND status != 'finished'"
+        if max_age_s is not None:
+            cutoff = datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp() - max_age_s, timezone.utc
+            ).isoformat(timespec="seconds")
+            sql += " AND last_heartbeat >= ?"
+            params.append(cutoff)
+        sql += " ORDER BY last_heartbeat DESC, id"
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_session(r) for r in rows]
+
+    def _row_to_session(self, row: sqlite3.Row) -> Session:
+        status = row["status"]
+        if status != "finished":
+            try:
+                age = (
+                    datetime.now(timezone.utc)
+                    - datetime.fromisoformat(row["last_heartbeat"])
+                ).total_seconds()
+            except ValueError:
+                age = 0
+            if age > self.SESSION_OFFLINE_AFTER_S:
+                status = "offline"
+        return Session(
+            id=row["id"],
+            agent_name=row["agent_name"],
+            machine=row["machine"],
+            repo=row["repo"],
+            project_id=row["project_id"],
+            model=row["model"],
+            status=status,
+            current_task_id=row["current_task_id"],
+            note=row["note"],
+            started_by=row["started_by"],
+            started_at=row["started_at"],
+            last_heartbeat=row["last_heartbeat"],
+        )
+
+    # ------------------------------------------------------------------
     # Projects
     # ------------------------------------------------------------------
 
@@ -1082,8 +1494,12 @@ class Store:
         icon: str = "",
         sort_order: int | None = None,
         path: str | None = None,
+        default_model: str | None = None,
+        analyst_model: str | None = None,
     ) -> Project:
         ts = _now()
+        default_model = normalize_model(default_model) or DEFAULT_AGENT_MODEL
+        analyst_model = normalize_model(analyst_model) or DEFAULT_AGENT_MODEL
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1094,9 +1510,11 @@ class Store:
                     sort_order = (r["m"] + 1) if r else 0
                 self._conn.execute(
                     """INSERT INTO projects
-                       (id, name, color, icon, sort_order, archived, path, created_at)
-                       VALUES (?, ?, ?, ?, ?, 0, ?, ?)""",
-                    (project_id, name, color, icon or name[:1].upper(), sort_order, path, ts),
+                       (id, name, color, icon, sort_order, archived, path, created_at,
+                        default_model, analyst_model)
+                       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+                    (project_id, name, color, icon or name[:1].upper(), sort_order, path, ts,
+                     default_model, analyst_model),
                 )
                 self._conn.execute("COMMIT")
             except Exception:
@@ -1115,13 +1533,20 @@ class Store:
         icon: str | None = None,
         sort_order: int | None = None,
         path: str | None = None,
+        default_model: str | None = None,
+        analyst_model: str | None = None,
     ) -> Project:
         sets: list[str] = []
         params: list[Any] = []
+        if default_model is not None:
+            default_model = normalize_model(default_model) or DEFAULT_AGENT_MODEL
+        if analyst_model is not None:
+            analyst_model = normalize_model(analyst_model) or DEFAULT_AGENT_MODEL
         # path is forwarded as-is (None means "leave alone", "" means "clear").
         for col, val in (
             ("name", name), ("color", color), ("icon", icon),
             ("sort_order", sort_order), ("path", path),
+            ("default_model", default_model), ("analyst_model", analyst_model),
         ):
             if val is not None:
                 sets.append(f"{col} = ?")
@@ -1216,6 +1641,10 @@ class Store:
             archived=bool(row["archived"]),
             created_at=row["created_at"],
             path=row["path"] if "path" in row.keys() else None,
+            default_model=(row["default_model"] if "default_model" in row.keys() else None)
+            or DEFAULT_AGENT_MODEL,
+            analyst_model=(row["analyst_model"] if "analyst_model" in row.keys() else None)
+            or DEFAULT_AGENT_MODEL,
         )
 
     # ------------------------------------------------------------------
@@ -1228,7 +1657,7 @@ class Store:
         projects = self.list_projects(include_archived=True)
         return {
             "exported_at": _now(),
-            "schema_version": 5,
+            "schema_version": 6,
             "projects": [p.to_public() for p in projects],
             "tasks": [t.to_public() for t in tasks],
         }
@@ -1325,6 +1754,11 @@ class Store:
             column_order=row["column_order"],
             project_id=row["project_id"] if "project_id" in keys else DEFAULT_PROJECT_ID,
             archived_at=row["archived_at"] if "archived_at" in keys else None,
+            **{
+                name: row[name]
+                for name, _ in Store._V6_TASK_COLUMNS
+                if name in keys and row[name] is not None
+            },
         )
 
     def close(self) -> None:

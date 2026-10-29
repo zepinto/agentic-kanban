@@ -175,7 +175,7 @@ def test_migration_from_v4_database(tmp_path):
     try:
         t = s.get_task("T-001")
         assert t.archived_at is None and t.title == "old"
-        assert s._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "5"
+        assert s._conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "6"
         s.record_rule_firing("r", "T-001", t.moved_at)
         assert s.rule_last_fired("r", "T-001", t.moved_at) is not None
     finally:

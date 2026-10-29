@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS tasks (
     id              TEXT PRIMARY KEY,                -- T-001, T-002, ...
     title           TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'backlog', -- backlog/approved/analyst/in_progress/testing/uat/done/blocked/cancelled
+    status          TEXT NOT NULL DEFAULT 'backlog', -- backlog/analysis/approved/in_progress/testing/results/done/blocked/cancelled (v6)
     priority        TEXT NOT NULL DEFAULT 'normal',  -- high/normal/low
     size            TEXT NOT NULL DEFAULT 'M',       -- S/M/L
     assignee        TEXT,                            -- user / agent:<name> / NULL
@@ -105,6 +105,26 @@ CREATE TABLE IF NOT EXISTS command_jobs (
     started_at  TEXT,
     PRIMARY KEY (rule_key, task_id)
 );
+
+-- v6: agent sessions (Claude Code processes) known to the board. Task and
+-- project columns added in v6 come from Store._migrate_v6 (ALTER TABLE), so
+-- fresh and upgraded databases go through the same path.
+CREATE TABLE IF NOT EXISTS sessions (
+    id               TEXT PRIMARY KEY,           -- Claude Code session id (CLAUDE_CODE_SESSION_ID)
+    agent_name       TEXT NOT NULL,              -- worker-3, analyst-1, claude
+    machine          TEXT NOT NULL DEFAULT '',
+    repo             TEXT NOT NULL DEFAULT '',
+    project_id       TEXT,
+    model            TEXT,                       -- opus / sonnet / haiku
+    status           TEXT NOT NULL DEFAULT 'active', -- active/idle/waiting_input/finished
+    current_task_id  TEXT,
+    note             TEXT NOT NULL DEFAULT '',
+    started_by       TEXT NOT NULL DEFAULT 'manual', -- hub | manual
+    started_at       TEXT NOT NULL,
+    last_heartbeat   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, last_heartbeat);
 
 -- meta for migrations
 CREATE TABLE IF NOT EXISTS meta (

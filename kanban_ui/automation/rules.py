@@ -62,7 +62,7 @@ from pathlib import Path
 from typing import Any
 
 from kanban_store import Store, STATUSES
-from kanban_store.store import RESOLVED_STATUSES
+from kanban_store.store import RESOLVED_STATUSES, normalize_status
 
 log = logging.getLogger("kanban.automation.rules")
 
@@ -178,6 +178,35 @@ def rule_key(rule: dict[str, Any]) -> str:
     return "h:" + hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
 
 
+def _canonical_statuses(rule: Any) -> None:
+    """Rewrite status names in a rule to canonical ids, in place, so rules
+    written for the pre-v6 columns (``uat``, ``analyst``) or with friendly
+    spellings (``"In progress"``) keep loading. Unknown names are left as
+    they are for _validate_rule to report."""
+    if not isinstance(rule, dict):
+        return
+
+    def canon(v: Any) -> Any:
+        if not isinstance(v, str):
+            return v
+        try:
+            return normalize_status(v)
+        except ValueError:
+            return v
+
+    t, a, w = rule.get("trigger"), rule.get("action"), rule.get("wip_limit")
+    if isinstance(t, dict):
+        for k in ("status", "to_status", "from_status"):
+            if k in t:
+                t[k] = canon(t[k])
+        if isinstance(t.get("resolved_statuses"), list):
+            t["resolved_statuses"] = [canon(x) for x in t["resolved_statuses"]]
+    if isinstance(a, dict) and "status" in a:
+        a["status"] = canon(a["status"])
+    if isinstance(w, dict) and isinstance(w.get("statuses"), list):
+        w["statuses"] = [canon(x) for x in w["statuses"]]
+
+
 def _validate_rule(rule: dict[str, Any], idx: int) -> list[str]:
     errs: list[str] = []
     if not isinstance(rule, dict):
@@ -281,6 +310,7 @@ def _load_rules(path: Path) -> tuple[list[dict[str, Any]], list[str], bool]:
     errs: list[str] = []
     valid: list[dict[str, Any]] = []
     for i, r in enumerate(rules):
+        _canonical_statuses(r)
         rule_errs = _validate_rule(r, i)
         if rule_errs:
             errs.extend(rule_errs)

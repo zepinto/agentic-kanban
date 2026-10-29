@@ -27,10 +27,17 @@ Environment:
 * ``KANBAN_ACTOR``      — name written to history for this agent's changes
   (default ``claude``); a tool's ``actor`` argument overrides it.
 * ``KANBAN_MCP_HUMAN_ONLY`` — comma-separated statuses agents may not move
-  or create cards into (default ``done``: closing is the human's call after
-  review). Set to an empty string to allow everything.
+  or create cards into (default ``analysis,approved,done``: refining,
+  approving and closing are the human's calls). Set to an empty string to
+  allow everything.
 * ``KANBAN_URL``        — base URL of the web UI for card links
   (default ``http://localhost:7777``).
+* ``CLAUDE_CODE_SESSION_ID`` — set by Claude Code for its MCP servers. When
+  present, the session registers itself on the board on its first change
+  and every change counts as a heartbeat (no need to call session_register).
+* ``KANBAN_AGENT_MODEL`` / ``KANBAN_STARTED_BY`` — what the launcher started
+  this session with (``opus``/``sonnet``/``haiku``; ``hub``), shown on the
+  sessions strip.
 
 Tool arguments are strict: an unknown argument name (``project`` instead of
 ``project_id``, ``body`` instead of ``description``) is an error with a
@@ -43,10 +50,10 @@ Tools:
 * ``kanban_board``     — compact board overview of one project
 * ``kanban_list``      — list tasks (filter by status / assignee / project)
 * ``kanban_search``    — substring search in title/description
-* ``kanban_my_active`` — the agent's tasks in analyst/in_progress/testing
+* ``kanban_my_active`` — the agent's tasks in in_progress/testing
 * ``kanban_get``       — full card with the newest history rows
 * ``kanban_history``   — older history, page by page
-* ``kanban_pull``      — atomically "claim a task" (approved → analyst)
+* ``kanban_pull``      — atomically "claim a task" (approved → in_progress)
 * ``kanban_move``      — move a task to a new status
 * ``kanban_assign``    — set or clear the assignee
 * ``kanban_comment``   — comment in history
@@ -54,6 +61,9 @@ Tools:
 * ``kanban_update``    — edit fields
 * ``kanban_link``      — add a link (memory / file / pr / url / plan)
 * ``kanban_blockers``  — replace internal blockers (dependencies)
+* ``task_propose``     — propose a task or user story; always lands in Backlog
+* ``session_register`` — announce this agent session on the board
+* ``session_status``   — report status / current card / a short note
 
 Changes made here land in ``task_history``; the web server's event feed
 picks them up within about a second, so automation rules and webhooks fire
@@ -67,6 +77,7 @@ from __future__ import annotations
 import difflib
 import logging
 import os
+import socket
 from dataclasses import asdict
 from typing import Any
 
@@ -102,7 +113,56 @@ def _get_store() -> Store:
 
 
 def _actor(explicit: str | None) -> str:
+    # Every mutating tool resolves its actor: a natural place for the heartbeat.
+    _heartbeat()
     return (explicit or "").strip() or os.environ.get("KANBAN_ACTOR", "").strip() or "claude"
+
+
+# ---------------------------------------------------------------------------
+# Agent session (one per MCP server process = one Claude Code session)
+# ---------------------------------------------------------------------------
+
+_session: dict[str, Any] = {"id": None, "registered": False}
+
+
+def _session_id() -> str | None:
+    return _session["id"] or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip() or None
+
+
+def _session_defaults() -> dict[str, Any]:
+    return {
+        "agent_name": os.environ.get("KANBAN_ACTOR", "").strip() or "claude",
+        "machine": socket.gethostname(),
+        "repo": os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("PWD") or "",
+        "project_id": os.environ.get("KANBAN_PROJECT_ID") or None,
+        "model": os.environ.get("KANBAN_AGENT_MODEL") or None,
+        "started_by": "hub" if os.environ.get("KANBAN_STARTED_BY") == "hub" else "manual",
+    }
+
+
+def _heartbeat() -> None:
+    """Refresh this session's heartbeat; registers it on first use when
+    Claude Code told us its session id. Never fails the calling tool."""
+    sid = _session_id()
+    if not sid:
+        return
+    try:
+        if _session["registered"]:
+            _get_store().touch_session(sid)
+            return
+        d = _session_defaults()
+        if d["project_id"] and _get_store().get_project(d["project_id"]) is None:
+            d["project_id"] = None
+        try:
+            _get_store().register_session(sid, **d)
+        except ValueError:
+            d["model"] = None
+            _get_store().register_session(sid, **d)
+        _session.update(id=sid, registered=True)
+    except KeyError:
+        _session["registered"] = False
+    except Exception:  # noqa: BLE001 — the board view is best-effort
+        log.debug("session heartbeat failed", exc_info=True)
 
 
 def _scope(project_id: str | None) -> str | None:
@@ -155,6 +215,10 @@ def _short_task(t: Any) -> dict[str, Any]:
         "blockers": t.blockers,
         "project_id": t.project_id,
         "archived": bool(t.archived_at),
+        "type": t.type,
+        "agent_model": t.agent_model,
+        "origin": t.origin,
+        "parent_id": t.parent_id,
         "url": _url(t.id),
     }
 
@@ -169,7 +233,7 @@ def kanban_list(
     """List tasks with optional filters.
 
     Args:
-        status: one of backlog/approved/analyst/in_progress/testing/uat/done/blocked/cancelled,
+        status: one of backlog/analysis/approved/in_progress/testing/results/done/blocked/cancelled,
                 or None for all.
         assignee: claude / agent:<name> / user, or None for all.
         project_id: project slug (see kanban_projects); default = this agent's
@@ -280,7 +344,7 @@ def kanban_my_active(
     assignee: str | None = None,
     project_id: str | None = None,
 ) -> dict[str, Any]:
-    """Active tasks for the given assignee — in analyst/in_progress/testing.
+    """Active tasks for the given assignee — in in_progress/testing.
 
     Perfect as the first query of a session: "what am I working on right now?"
 
@@ -294,7 +358,7 @@ def kanban_my_active(
         tasks = _get_store().list_tasks(assignee=who, project_id=_scope(project_id))
     except Exception as e:
         return _err(str(e))
-    active = [t for t in tasks if t.status in ("analyst", "in_progress", "testing")]
+    active = [t for t in tasks if t.status in ("in_progress", "testing")]
     return _ok({
         "tasks": [_short_task(t) for t in active],
         "count": len(active),
@@ -339,7 +403,7 @@ def kanban_history(task_id: str, limit: int = 50, before_id: int | None = None) 
 
 @mcp.tool()
 def kanban_pull(task_id: str, assignee: str | None = None) -> dict[str, Any]:
-    """Atomically "claim a task" from Approved → Analyst.
+    """Atomically "claim a task" from Approved → In progress.
 
     Conditions: the task must be in status ``approved`` AND its assignee
     must be either None or equal to ``assignee`` (default: this agent,
@@ -348,7 +412,7 @@ def kanban_pull(task_id: str, assignee: str | None = None) -> dict[str, Any]:
     itself, so you do not need to provide it.
     """
     try:
-        _get_store().pull_task(task_id, assignee=_actor(assignee))
+        _get_store().pull_task(task_id, assignee=_actor(assignee), session_id=_session_id())
         # The claim is when the agent starts work: hand back the full card.
         t = _get_store().get_task(task_id, history_limit=10)
     except KeyError:
@@ -370,8 +434,9 @@ def kanban_move(
 
     Args:
         task_id: T-XXX
-        to_status: backlog / approved / analyst / in_progress / testing / uat /
-                   done / blocked / cancelled (see kanban_columns).
+        to_status: backlog / analysis / approved / in_progress / testing /
+                   results / done / blocked / cancelled (see kanban_columns).
+                   Finished work goes to "results" for the human's review.
         comment: optional comment, recorded in history.
         expected_from: only move if the task is still in this status — protects
                        against acting on a card a human or another agent has
@@ -424,7 +489,7 @@ def kanban_comment(
 ) -> dict[str, Any]:
     """Add a comment to the task's history.
 
-    Useful for recording the plan once the task lands in Analyst, or for
+    Useful for recording the plan once you claim the task, or for
     capturing a test result.
     """
     try:
@@ -449,6 +514,9 @@ def kanban_create(
     project_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a new card. Defaults to Backlog; for immediate work pass status='in_progress'.
+
+    To suggest follow-up work or a user story for the human to approve,
+    prefer task_propose.
 
     Args:
         title: a short single-line title.
@@ -479,6 +547,8 @@ def kanban_create(
             external_blocker=external_blocker,
             actor=_actor(actor),
             project_id=pid,
+            origin="agent",
+            origin_session_id=_session_id(),
         )
     except Exception as e:
         return _err(str(e))
@@ -529,11 +599,16 @@ def kanban_update(
     priority: str | None = None,
     size: str | None = None,
     external_blocker: str | None = None,
+    story_as_a: str | None = None,
+    story_i_want: str | None = None,
+    story_so_that: str | None = None,
+    parent_id: str | None = None,
     actor: str | None = None,
 ) -> dict[str, Any]:
     """Update card fields (status: kanban_move; assignee: kanban_assign).
 
-    Only the fields you pass are changed; external_blocker="" clears it.
+    Only the fields you pass are changed; external_blocker="" and
+    parent_id="" clear them. The worker model is chosen in Analysis, not here.
     """
     try:
         t = _get_store().update_fields(
@@ -545,12 +620,156 @@ def kanban_update(
             priority=priority,
             size=size,
             external_blocker=external_blocker,
+            story_as_a=story_as_a,
+            story_i_want=story_i_want,
+            story_so_that=story_so_that,
+            parent_id=parent_id,
         )
     except KeyError:
         return _err(f"task {task_id} not found")
     except Exception as e:
         return _err(str(e))
     return _ok(_short_task(t))
+
+
+@mcp.tool()
+def task_propose(
+    title: str,
+    description: str = "",
+    type: str = "task",
+    story_as_a: str = "",
+    story_i_want: str = "",
+    story_so_that: str = "",
+    acceptance: str = "",
+    parent_id: str | None = None,
+    from_task_id: str | None = None,
+    priority: str = "normal",
+    size: str = "M",
+    project_id: str | None = None,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Propose new work for the human to review: a follow-up you found, or
+    a user story broken into tasks. The card always lands in Backlog, marked
+    as proposed by you; only the human moves it on (Analysis → Approved).
+
+    Args:
+        title: a short single-line title.
+        description: markdown with the details and why it matters.
+        type: "task" (default) or "story".
+        story_as_a / story_i_want / story_so_that: the user story, for
+            type="story" ("As a <role>, I want <goal>, so that <benefit>").
+        acceptance: acceptance criteria, ideally a "- [ ] ..." checklist.
+        parent_id: the story this task belongs to.
+        from_task_id: the card you were working on when you found this
+            (default: this session's current card).
+        priority: critical / high / normal / low.
+        size: S / M / L / XL.
+        project_id: default = KANBAN_PROJECT_ID, else the source card's project.
+    """
+    who = _actor(actor)
+    store = _get_store()
+    origin_task = (from_task_id or "").strip() or None
+    sid = _session_id()
+    if origin_task is None and sid:
+        s = store.get_session(sid)
+        origin_task = s.current_task_id if s else None
+    pid = project_id or os.environ.get("KANBAN_PROJECT_ID")
+    if not pid and origin_task:
+        src = store.get_task(origin_task, history_limit=0)
+        pid = src.project_id if src else None
+    try:
+        t = store.create_task(
+            title=title,
+            description=description,
+            acceptance=acceptance,
+            status="backlog",
+            priority=priority,
+            size=size,
+            actor=who,
+            project_id=pid or DEFAULT_PROJECT_ID,
+            type=type,
+            story_as_a=story_as_a,
+            story_i_want=story_i_want,
+            story_so_that=story_so_that,
+            parent_id=parent_id,
+            origin="agent",
+            origin_session_id=sid,
+            origin_task_id=origin_task,
+        )
+    except Exception as e:
+        return _err(str(e))
+    return _ok(_short_task(t))
+
+
+@mcp.tool()
+def session_register(
+    agent_name: str | None = None,
+    repo: str | None = None,
+    project_id: str | None = None,
+    model: str | None = None,
+    task_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Announce this agent session on the board's sessions strip.
+
+    Usually not needed: under Claude Code the session registers itself on
+    its first change. Call it to set a clearer name (e.g. "analyst-1") or
+    when your client does not provide a session id.
+
+    Args:
+        agent_name: name shown on the board (default KANBAN_ACTOR or "claude").
+        repo: working directory or repository of the session.
+        project_id: default = KANBAN_PROJECT_ID.
+        model: opus / sonnet / haiku.
+        task_id: the card you are working on, if any.
+        session_id: default = Claude Code's session id; a new id is made up
+            when there is none.
+    """
+    import uuid
+
+    sid = (session_id or "").strip() or _session_id() or f"s-{uuid.uuid4().hex[:12]}"
+    d = _session_defaults()
+    try:
+        s = _get_store().register_session(
+            sid,
+            (agent_name or "").strip() or d["agent_name"],
+            machine=d["machine"],
+            repo=(repo if repo is not None else d["repo"]),
+            project_id=project_id or d["project_id"],
+            model=model or d["model"],
+            started_by=d["started_by"],
+            current_task_id=task_id,
+        )
+    except Exception as e:
+        return _err(str(e))
+    _session.update(id=sid, registered=True)
+    return _ok(s.to_public())
+
+
+@mcp.tool()
+def session_status(
+    status: str | None = None,
+    task_id: str | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Tell the board what this session is doing.
+
+    Args:
+        status: active / idle / waiting_input / finished.
+        task_id: the card you are on now ("" = none).
+        note: one short line, e.g. "running the replay tests".
+    """
+    _heartbeat()
+    sid = _session_id()
+    if not sid:
+        return _err("no session: call session_register first")
+    try:
+        s = _get_store().touch_session(sid, status=status, task_id=task_id, note=note)
+    except KeyError:
+        return _err("session not registered: call session_register first")
+    except Exception as e:
+        return _err(str(e))
+    return _ok(s.to_public())
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,9 @@ Endpoints:
     POST   /api/tasks/{task_id}/links
     POST   /api/tasks/{task_id}/blockers
     POST   /api/snapshot              — persist a board snapshot
+    GET    /api/sessions?project=     — agent sessions (sessions strip)
+    POST   /api/sessions              — register a session (launchers, hooks)
+    POST   /api/sessions/{id}/status  — heartbeat / status / current card
     GET    /api/automation/status     — inbox / rules / events / webhooks
     POST   /api/automation/pause      — pause or resume automation rules
 
@@ -46,7 +49,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from kanban_store import Store, STATUSES, StatusConflict, status_meta
-from kanban_store.store import DEFAULT_PROJECT_ID, LINK_TYPES, normalize_status
+from kanban_store.store import (
+    AGENT_MODELS, DEFAULT_PROJECT_ID, LINK_TYPES, SESSION_STATUSES, TASK_TYPES,
+    normalize_status,
+)
 from kanban_mcp.connect import DEFAULT_ALIAS, connect as connect_mcp, detect_alias
 from kanban_mcp.policy import check_agent_may_use
 from kanban_ui import __version__
@@ -217,6 +223,16 @@ class TaskCreate(_Strict):
     external_blocker: str | None = None
     links: list[LinkIn] = Field(default_factory=list)
     project_id: str = DEFAULT_PROJECT_ID
+    type: str = Field("task", description=f"one of {', '.join(TASK_TYPES)}")
+    story_as_a: str = ""
+    story_i_want: str = ""
+    story_so_that: str = ""
+    parent_id: str | None = Field(None, description="the story this task belongs to")
+    origin_task_id: str | None = Field(
+        None, description="card the author was working on when this came up"
+    )
+    agent_model: str | None = Field(None, description=f"one of {', '.join(AGENT_MODELS)}")
+    analysis_md: str = ""
 
 
 class TaskUpdate(_Strict):
@@ -228,6 +244,33 @@ class TaskUpdate(_Strict):
     external_blocker: str | None = Field(
         None, description='"" clears the external blocker; null leaves it unchanged'
     )
+    type: str | None = Field(None, description=f"one of {', '.join(TASK_TYPES)}")
+    story_as_a: str | None = None
+    story_i_want: str | None = None
+    story_so_that: str | None = None
+    parent_id: str | None = Field(None, description='"" clears it')
+    agent_model: str | None = Field(
+        None, description=f'worker model: {", ".join(AGENT_MODELS)}; "" clears it'
+    )
+    analysis_md: str | None = Field(None, description="analysis notes for the agent's brief")
+    model_rationale: str | None = None
+
+
+class SessionRegister(_Strict):
+    id: str = Field(..., description="Claude Code session id")
+    agent_name: str
+    machine: str = ""
+    repo: str = ""
+    project_id: str | None = None
+    model: str | None = Field(None, description=f"one of {', '.join(AGENT_MODELS)}")
+    started_by: str = Field("manual", description="hub (started by the board) or manual")
+    current_task_id: str | None = None
+
+
+class SessionStatus(_Strict):
+    status: str | None = Field(None, description=f"one of {', '.join(SESSION_STATUSES)}")
+    task_id: str | None = Field(None, description='current card; "" clears it')
+    note: str | None = None
 
 
 class AssignRequest(_Strict):
@@ -272,6 +315,8 @@ class ProjectCreate(BaseModel):
     icon: str = ""
     sort_order: int | None = None
     path: str | None = None
+    default_model: str | None = Field(None, description="worker model a card starts with")
+    analyst_model: str | None = Field(None, description="model the analyst agent runs on")
 
 
 class ProjectUpdate(BaseModel):
@@ -280,6 +325,8 @@ class ProjectUpdate(BaseModel):
     icon: str | None = None
     sort_order: int | None = None
     path: str | None = None
+    default_model: str | None = None
+    analyst_model: str | None = None
 
 
 class ProjectArchiveRequest(BaseModel):
@@ -361,6 +408,12 @@ def get_board(
                 "moved_at": t.moved_at,
                 "archived_at": t.archived_at,
                 "project_id": t.project_id,
+                "type": t.type,
+                "parent_id": t.parent_id,
+                "origin": t.origin,
+                "origin_task_id": t.origin_task_id,
+                "agent_model": t.agent_model,
+                "assigned_session_id": t.assigned_session_id,
                 # run_command processes currently running for this card
                 "running": running.get(t.id, []),
             }
@@ -410,14 +463,19 @@ def create_project(req: ProjectCreate) -> dict[str, Any]:
         )
     if _store.get_project(req.id) is not None:
         raise HTTPException(409, f"project {req.id} already exists")
-    p = _store.create_project(
-        req.id,
-        req.name,
-        color=req.color,
-        icon=req.icon,
-        sort_order=req.sort_order,
-        path=_normalize_path(req.path),
-    )
+    try:
+        p = _store.create_project(
+            req.id,
+            req.name,
+            color=req.color,
+            icon=req.icon,
+            sort_order=req.sort_order,
+            path=_normalize_path(req.path),
+            default_model=req.default_model,
+            analyst_model=req.analyst_model,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return p.to_public()
 
 
@@ -432,9 +490,13 @@ def update_project(project_id: str, req: ProjectUpdate) -> dict[str, Any]:
             sort_order=req.sort_order,
             # an empty string clears path in the database
             path=_normalize_path(req.path) if req.path != "" else "",
+            default_model=req.default_model,
+            analyst_model=req.analyst_model,
         )
     except KeyError:
         raise HTTPException(404, f"project {project_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return p.to_public()
 
 
@@ -770,6 +832,16 @@ def create_task(
             actor=_actor(x_kanban_actor, x_kanban_via),
             links=[ln.model_dump() for ln in req.links] or None,
             project_id=req.project_id,
+            type=req.type,
+            story_as_a=req.story_as_a,
+            story_i_want=req.story_i_want,
+            story_so_that=req.story_so_that,
+            parent_id=req.parent_id,
+            # HTTP MCP clients are agents: their cards are proposals
+            origin="agent" if x_kanban_via == MCP_VIA else "user",
+            origin_task_id=req.origin_task_id,
+            agent_model=req.agent_model,
+            analysis_md=req.analysis_md,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -792,6 +864,18 @@ def update_task(
             priority=req.priority,
             size=req.size,
             external_blocker=req.external_blocker,
+            type=req.type,
+            story_as_a=req.story_as_a,
+            story_i_want=req.story_i_want,
+            story_so_that=req.story_so_that,
+            parent_id=req.parent_id,
+            agent_model=req.agent_model,
+            analysis_md=req.analysis_md,
+            model_rationale=req.model_rationale,
+            # whoever writes the analysis notes is the analyst
+            analysed_by=(
+                _actor(x_kanban_actor, x_kanban_via) if req.analysis_md is not None else None
+            ),
         )
     except KeyError:
         raise HTTPException(404, f"task {task_id} not found")
@@ -898,6 +982,50 @@ def set_blockers(
         raise HTTPException(400, str(e))
     _kick()
     return {"ok": True, "blockers": stored}
+
+
+# ---------------------------------------------------------------------------
+# Agent sessions
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/sessions")
+def list_sessions(
+    project: str | None = Query(None, description="project slug; omit for all projects"),
+    include_finished: bool = Query(False, description="also list finished sessions"),
+) -> dict[str, Any]:
+    """Agent sessions for the sessions strip, most recently heard from first.
+    Silent sessions show as ``offline``; those silent for over a day are
+    left out."""
+    sessions = _store.list_sessions(project_id=project, include_finished=include_finished)
+    return {"sessions": [s.to_public() for s in sessions]}
+
+
+@app.post("/api/sessions", status_code=201)
+def register_session(req: SessionRegister) -> dict[str, Any]:
+    """Register (or refresh) an agent session — for launchers and hooks;
+    sessions using the stdio MCP server register themselves."""
+    try:
+        s = _store.register_session(
+            req.id, req.agent_name, machine=req.machine, repo=req.repo,
+            project_id=req.project_id, model=req.model, started_by=req.started_by,
+            current_task_id=req.current_task_id,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return s.to_public()
+
+
+@app.post("/api/sessions/{session_id}/status")
+def session_status(session_id: str, req: SessionStatus) -> dict[str, Any]:
+    """Heartbeat; optionally a new status, current card or note."""
+    try:
+        s = _store.touch_session(session_id, status=req.status, task_id=req.task_id, note=req.note)
+    except KeyError:
+        raise HTTPException(404, f"session {session_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return s.to_public()
 
 
 # ---------------------------------------------------------------------------
@@ -1191,7 +1319,7 @@ _mcp_http = FastApiMCP(
     name="agent-kanban",
     description=(
         "Local-first kanban for AI-agent workflows. Drag a task to Approved "
-        "and your AI agent drives it through analyst → in_progress → testing."
+        "and an agent on the card's model drives it through in_progress → results."
     ),
     exclude_operations=_MCP_EXCLUDED,
     # Same in-process transport fastapi-mcp builds by default, plus a marker

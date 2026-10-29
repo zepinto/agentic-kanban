@@ -14,6 +14,8 @@ def mcp_store(store, monkeypatch):
     monkeypatch.delenv("KANBAN_ACTOR", raising=False)
     monkeypatch.delenv("KANBAN_PROJECT_ID", raising=False)
     monkeypatch.delenv("KANBAN_MCP_HUMAN_ONLY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setattr(server, "_session", {"id": None, "registered": False})
     store.create_project("other", "Other")
     return store
 
@@ -110,12 +112,12 @@ async def test_pull_returns_the_card(mcp_store):
     t = mcp_store.create_task("x", project_id="proj", status="approved",
                               description="what to do")
     r = await _call("kanban_pull", task_id=t.id)
-    assert r["ok"] and r["data"]["status"] == "analyst"
+    assert r["ok"] and r["data"]["status"] == "in_progress"
     assert r["data"]["description"] == "what to do" and r["data"]["assignee"] == "claude"
 
 
 @pytest.mark.asyncio
 async def test_tool_schemas_forbid_extra_properties():
     tools = await server.mcp.list_tools()
-    assert len(tools) == 16
+    assert len(tools) == 19  # 16 upstream + task_propose, session_register, session_status
     assert all(t.inputSchema.get("additionalProperties") is False for t in tools)

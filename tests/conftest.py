@@ -22,6 +22,7 @@ os.environ["KANBAN_LOG_DIR"] = str(_TMP / "logs")
 os.environ["KANBAN_EVENTS_INTERVAL"] = "0.05"
 os.environ.pop("KANBAN_ACTOR", None)
 os.environ.pop("KANBAN_PROJECT_ID", None)
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)  # set when the suite runs inside Claude Code
 
 from kanban_store import Store  # noqa: E402
 
