@@ -1217,6 +1217,7 @@ input.field--error {
 }
 .analysis__head,
 .message__head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.analysis__run { margin-left: auto; }
 .analysis__title,
 .message__title {
   font-size: 16px;             /* title-medium */

@@ -21,6 +21,12 @@ Triggers:
     - task_count_in_status: status=X, gt=N | lt=N — task counter in a column (polling)
     - blockers_done: status=X (default backlog), resolved_statuses? — tasks
       in X that have internal blockers, all of them done/cancelled (polling)
+    - task_event: action=analysis_requested|message|report|reply|comment,
+      agent? (offline|live), from? (human|any; default human for message) —
+      reactive, fires when that row lands in the card's history. ``agent:
+      "offline"`` means no live session is on the card and no run_command for
+      it is running: the way to resume a finished agent when you message it.
+      Placeholders add {action}, {actor}, {comment}, {session_id}, {model}.
     - task_moved: to_status=X, from_status?, project_id? — reactive, fires
       right after a move made by anyone: UI, REST, MCP agents, scripts.
       A task *created* directly in X counts as moved into X (from_status null).
@@ -62,13 +68,15 @@ from pathlib import Path
 from typing import Any
 
 from kanban_store import Store, STATUSES
-from kanban_store.store import RESOLVED_STATUSES, normalize_status
+from kanban_store.store import RESOLVED_STATUSES, is_machine_actor, normalize_status
 
 log = logging.getLogger("kanban.automation.rules")
 
 DEFAULT_INTERVAL = float(os.environ.get("KANBAN_AUTOMATION_INTERVAL", "60"))
 
-VALID_TRIGGERS = {"task_idle", "task_count_in_status", "task_moved", "blockers_done"}
+VALID_TRIGGERS = {"task_idle", "task_count_in_status", "task_moved", "blockers_done", "task_event"}
+# History actions a task_event trigger can react to.
+EVENT_ACTIONS = {"analysis_requested", "message", "report", "reply", "comment"}
 VALID_ACTIONS = {"move_to", "add_comment", "set_priority", "run_command", "archive", "assign"}
 VALID_PRIORITIES = {"critical", "high", "normal", "low"}
 
@@ -241,6 +249,13 @@ def _validate_rule(rule: dict[str, Any], idx: int) -> list[str]:
             if rs is not None and (not isinstance(rs, list) or not rs
                                    or any(x not in STATUSES for x in rs)):
                 errs.append(f"{name}: trigger.resolved_statuses must be a list of statuses")
+        elif t["type"] == "task_event":
+            if t.get("action") not in EVENT_ACTIONS:
+                errs.append(f"{name}: task_event.action must be one of {sorted(EVENT_ACTIONS)}")
+            if t.get("agent") not in (None, "offline", "live"):
+                errs.append(f"{name}: task_event.agent must be 'offline' or 'live'")
+            if t.get("from") not in (None, "human", "any"):
+                errs.append(f"{name}: task_event.from must be 'human' or 'any'")
         elif t["type"] == "task_moved":
             # to_status is required, from_status and project_id are optional
             if t.get("to_status") not in STATUSES:
@@ -792,6 +807,9 @@ class CommandRunner:
                     self._start(job)
                 queue.popleft()
 
+    def running_jobs(self) -> list[dict[str, Any]]:
+        return [{"rule": j["rule"], "task_id": j["task_id"]} for j in self._running.values()]
+
     def status(self) -> dict[str, Any]:
         return {
             "running": [
@@ -906,6 +924,15 @@ def _run_once(store: Store, rules: list[dict[str, Any]]) -> list[dict[str, Any]]
 _engine: "RuleEngine | None" = None
 
 
+def _agent_live(store: Store, task_id: str) -> bool:
+    """An agent is on the card right now: a live session holds it, or a
+    run_command for it is running (a launcher between agent turns)."""
+    for s in store.list_sessions():
+        if s.current_task_id == task_id and s.status in ("active", "waiting_input"):
+            return True
+    return any(r.get("task_id") == task_id for r in _commands.running_jobs())
+
+
 def emit_rule_event(event: str, payload: dict[str, Any]) -> list[str]:
     """Reactive event handling (invoked by the event feed).
 
@@ -929,6 +956,51 @@ def emit_rule_event(event: str, payload: dict[str, Any]) -> list[str]:
     for rule in rules:
         trig = rule["trigger"]
         if trig["type"] != event:
+            continue
+        if event == "task_event":
+            if trig.get("action") != payload.get("action"):
+                continue
+            projects = _project_filter(rule)
+            if projects is not None and task.get("project_id") not in projects:
+                continue
+            want_from = trig.get("from") or ("human" if payload.get("action") == "message" else "any")
+            if want_from == "human" and is_machine_actor(payload.get("actor")):
+                continue
+            if trig.get("agent"):
+                live = _agent_live(_engine.store, task_id)
+                if (trig["agent"] == "offline") == live:
+                    continue
+            name = rule.get("name", "?")
+            if not _engine._loop_guard(rule_key(rule), task_id):
+                _push_error(name, f"{task_id}: fired {LOOP_LIMIT}+ times in "
+                                  f"{int(LOOP_WINDOW.total_seconds() // 60)} min — "
+                                  "looks like a rule loop, skipped")
+                continue
+            ctx = {
+                "task_id":    task_id,
+                "title":      task.get("title", ""),
+                "project_id": task.get("project_id", ""),
+                "status":     task.get("status", ""),
+                "from_status": "",
+                "to_status":  task.get("status", ""),
+                "action":     payload.get("action", ""),
+                "actor":      payload.get("actor", "") or "",
+                "comment":    payload.get("comment", "") or "",
+                "session_id": task.get("assigned_session_id") or task.get("origin_session_id") or "",
+                "model":      task.get("agent_model") or "",
+            }
+            try:
+                desc = _apply_action(_engine.store, task_id, rule["action"], ctx, rule=rule)
+                applied.append(desc)
+                _status["last_reactive"].insert(0, {
+                    "ts": _ts(), "rule": name, "event": f"task_event:{payload.get('action')}",
+                    "task_id": task_id, "actor": payload.get("actor"), "action": desc,
+                })
+                _status["last_reactive"] = _status["last_reactive"][:20]
+                log.info("reactive rule '%s' on %s: %s", name, task_id, desc)
+            except Exception as e:
+                log.exception("reactive rule '%s' failed", name)
+                _push_error(name, f"{task_id}: {e}")
             continue
         if event == "task_moved":
             if trig.get("to_status") and trig["to_status"] != payload.get("to_status"):

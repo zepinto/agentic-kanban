@@ -27,6 +27,7 @@ Endpoints:
     POST   /api/sessions/{id}/messages — message an agent session directly
     GET    /api/tasks/{id}/messages   — messages and replies on a card
     GET    /api/sessions/{id}/inbox   — unread messages (hooks; marks them read)
+    POST   /api/tasks/{id}/analyse    — send a card to the analyst agent
     POST   /api/tasks/{id}/reports    — post a progress / result report with assets
     GET    /api/tasks/{id}/reports    — a card's reports, newest first
     GET    /api/reports/{id}          — one report
@@ -1148,6 +1149,26 @@ def session_inbox(
         raise HTTPException(404, f"session {session_id} not found")
     msgs = _store.inbox(session_id, mark_delivered=mark_delivered)
     return {"messages": [m.to_public() for m in msgs], "count": len(msgs)}
+
+
+@app.post("/api/tasks/{task_id}/analyse")
+def analyse_task(
+    task_id: str, x_kanban_actor: str | None = Header(None),
+    x_kanban_via: str | None = Header(None, include_in_schema=False),
+) -> dict[str, Any]:
+    """Send a card to the analyst agent: it moves to Analysis and an
+    ``analysis_requested`` event fires (a ``task_event`` rule starts the
+    analyst on the project's analyst model)."""
+    if x_kanban_via == MCP_VIA:
+        raise HTTPException(403, "requesting analysis is reserved for a human")
+    try:
+        t, model = _store.request_analysis(task_id, actor=_actor(x_kanban_actor, x_kanban_via))
+    except KeyError:
+        raise HTTPException(404, f"task {task_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _kick()
+    return {"task": t.to_public(), "analyst_model": model}
 
 
 # ---------------------------------------------------------------------------

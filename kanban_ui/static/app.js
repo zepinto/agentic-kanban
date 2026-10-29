@@ -558,6 +558,7 @@ async function openTaskModal(taskId, { tab } = {}) {
   const canApprove = t.status === "backlog" || t.status === "analysis";
   $("#btn-approve").hidden = !canApprove;
   $("#btn-to-analysis").hidden = t.status !== "backlog";
+  $("#btn-analyse").hidden = !["backlog", "analysis", "blocked"].includes(t.status);
   $("#btn-archive-task").textContent = t.archived_at ? "Unarchive" : "Archive";
   renderLinks(t.links);
   renderHistory(t.history, t.history_total);
@@ -614,6 +615,20 @@ function modalPayload() {
     ...(($("#m-analysis").value !== ((state.modalTask && state.modalTask.analysis_md) || ""))
       ? { analysis_md: $("#m-analysis").value } : {}),
   };
+}
+
+async function analyseModalTask() {
+  const t = state.modalTask;
+  if (!t) return;
+  try {
+    await api("PATCH", `/api/tasks/${t.id}`, modalPayload());
+    const r = await api("POST", `/api/tasks/${encodeURIComponent(t.id)}/analyse`);
+    toast(`${t.id} sent to the analyst agent (${MODEL_TITLE[r.analyst_model] || r.analyst_model})`);
+    closeModal();
+    await loadBoard();
+  } catch (e) {
+    toast(`Error: ${e.message}`, "err");
+  }
 }
 
 async function moveModalTask(toStatus) {
@@ -1562,6 +1577,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (tid) openTaskModal(tid);
   });
   $("#btn-to-analysis").addEventListener("click", () => moveModalTask("analysis"));
+  $("#btn-analyse").addEventListener("click", analyseModalTask);
   $$("#m-model button").forEach(b => b.addEventListener("click", () =>
     setModalModel(state.modalModel === b.dataset.model ? "" : b.dataset.model)));
   $("#m-type").addEventListener("change", () => syncStoryVisibility("m"));

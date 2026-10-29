@@ -78,12 +78,14 @@ def _fake_claude(tmp: Path, body: str, logged_in: bool = True) -> Path:
     return p
 
 
-def _run(server, task_id: str, claude: Path, **env) -> subprocess.CompletedProcess:
+def _run(server, task_id: str, claude: Path, mode: str | None = None,
+         **env) -> subprocess.CompletedProcess:
     full = {**os.environ, "KANBAN_URL": server["url"], "CLAUDE_BIN": str(claude),
             "KANBAN_RUNS_DIR": str(server["tmp"] / "runs"), "FAKE_TASK": task_id,
-            "FAKE_URL": server["url"], **env}
-    return subprocess.run(["/bin/bash", str(LAUNCHER), task_id, "demo"],
-                          env=full, capture_output=True, text=True, timeout=60)
+            "FAKE_URL": server["url"], "FAKE_ARGS": str(server["tmp"] / f"args-{task_id}"),
+            **env}
+    argv = ["/bin/bash", str(LAUNCHER), task_id, "demo"] + ([mode] if mode else [])
+    return subprocess.run(argv, env=full, capture_output=True, text=True, timeout=60)
 
 
 def _task(server, **kw) -> dict:
@@ -224,3 +226,83 @@ def test_session_limit_message_is_a_usage_limit(server):
     r = _run(server, t["id"], claude)
     assert r.returncode == 75
     assert _card(server, t["id"])["status"] == "approved"
+
+
+# ---------------------------------------------------------------- Mission Board
+
+RECORD_ARGS = 'for a in "$@"; do printf "%s\\n" "$a"; done > "$FAKE_ARGS"\n'
+
+
+def _args(server, task_id: str) -> list[str]:
+    return (server["tmp"] / f"args-{task_id}").read_text().splitlines()
+
+
+def test_work_runs_on_the_cards_model(server):
+    t = _task(server, agent_model="opus")
+    r = _run(server, t["id"], _fake_claude(server["tmp"], RECORD_ARGS + AGENT_OK))
+    assert r.returncode == 0, r.stderr
+    args = _args(server, t["id"])
+    assert args[args.index("--model") + 1] == "opus"
+    assert "--settings" in args and "--resume" not in args
+    settings = json.loads(Path(args[args.index("--settings") + 1]).read_text())
+    assert "kanban_mcp.hook" in settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+
+
+def test_analyse_mode_uses_analyst_model_and_read_only_tools(server):
+    req = urllib.request.Request(server["url"] + "/api/projects/demo",
+                                 data=json.dumps({"analyst_model": "haiku"}).encode(),
+                                 headers={"Content-Type": "application/json"}, method="PATCH")
+    urllib.request.urlopen(req, timeout=10).read()
+    t = _task(server, status="analysis")
+    submit = (
+        'curl -s -X PATCH "$FAKE_URL/api/tasks/$FAKE_TASK" -H "Content-Type: application/json" '
+        '-H "X-Kanban-Actor: analyst" '
+        '-d \'{"analysis_md":"reuse the EKF","agent_model":"sonnet","model_rationale":"one module"}\' '
+        '>/dev/null\necho \'{"num_turns":2,"result":"ok"}\''
+    )
+    r = _run(server, t["id"], _fake_claude(server["tmp"], RECORD_ARGS + submit), mode="analyse")
+    assert r.returncode == 0, r.stderr
+    args = _args(server, t["id"])
+    assert args[args.index("--model") + 1] == "haiku"
+    tools = args[args.index("--allowedTools") + 1:]
+    assert "Read" in tools and "Edit" not in tools and "Bash" not in tools
+    assert any(x.endswith("__analysis_submit") for x in tools)
+    card = _card(server, t["id"])
+    assert card["status"] == "analysis" and card["agent_model"] == "sonnet"
+    assert "analysis submitted by analyst" in card["history"][-1]["comment"]
+
+
+def test_analyse_mode_without_submission_only_comments(server):
+    t = _task(server, status="analysis")
+    r = _run(server, t["id"], _fake_claude(server["tmp"], "echo '{}'"), mode="analyse")
+    assert r.returncode == 0, r.stderr
+    card = _card(server, t["id"])
+    assert card["status"] == "analysis"
+    assert "without submitting" in card["history"][-1]["comment"]
+
+
+def test_resume_mode_resumes_the_cards_session(server):
+    from kanban_store import Store
+
+    t = _task(server)
+    store = Store(server["tmp"] / "k.db", create=False)
+    try:
+        store.register_session("cc-old", "worker-1", project_id="demo")
+        store.pull_task(t["id"], "worker-1", session_id="cc-old")
+        store.move_task(t["id"], "results", actor="worker-1")
+    finally:
+        store.close()
+    r = _run(server, t["id"], _fake_claude(server["tmp"], RECORD_ARGS + "echo '{}'"), mode="resume")
+    assert r.returncode == 0, r.stderr
+    args = _args(server, t["id"])
+    assert args[args.index("--resume") + 1] == "cc-old"
+    card = _card(server, t["id"])
+    assert card["status"] == "results"              # a comment-only resume leaves it there
+    assert "(resume)" in card["history"][-1]["comment"]
+
+
+def test_resume_without_session_does_nothing(server):
+    t = _task(server, status="results")
+    r = _run(server, t["id"], _fake_claude(server["tmp"], RECORD_ARGS + "echo '{}'"), mode="resume")
+    assert r.returncode == 0
+    assert not (server["tmp"] / f"args-{t['id']}").exists()

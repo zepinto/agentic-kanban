@@ -66,6 +66,7 @@ Tools:
 * ``session_status``   — report status / current card / a short note
 * ``inbox_get``        — read the human's messages to this session (can wait)
 * ``inbox_reply``      — answer a message; the reply shows on the card
+* ``analysis_submit``  — the analyst agent's notes, criteria, model pick, subtasks
 * ``report_post``      — post a progress update or a final result with figures
   (mermaid diagrams, Plotly charts, snapshots, SVG, files)
 
@@ -966,6 +967,48 @@ def report_post(
         "moved_to_results": moved,
         "url": _url(tid),
     })
+
+
+@mcp.tool()
+def analysis_submit(
+    task_id: str,
+    analysis_md: str,
+    agent_model: str,
+    model_rationale: str = "",
+    acceptance: str | None = None,
+    story_as_a: str | None = None,
+    story_i_want: str | None = None,
+    story_so_that: str | None = None,
+    subtasks: list[dict[str, Any]] | None = None,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Hand back your analysis of a card (you are the analyst agent). The
+    card stays in Analysis; the human approves it with your model or another.
+
+    Args:
+        task_id: the card you analysed.
+        analysis_md: scope, approach, risks, files involved — this becomes
+            the worker agent's brief.
+        agent_model: the worker model you recommend: "opus" (hard, cross-
+            cutting, ambiguous), "sonnet" (most work) or "haiku" (small,
+            mechanical, well specified).
+        model_rationale: one line on why.
+        acceptance: refined acceptance criteria, a "- [ ] ..." checklist.
+        story_as_a / story_i_want / story_so_that: refined user story.
+        subtasks: optional split, each {"title", "description"?, "acceptance"?,
+            "size"?, "agent_model"?}; created in Analysis as children of the card.
+    """
+    try:
+        t, created = _get_store().submit_analysis(
+            task_id, actor=_actor(actor), analysis_md=analysis_md, agent_model=agent_model,
+            model_rationale=model_rationale, acceptance=acceptance, story_as_a=story_as_a,
+            story_i_want=story_i_want, story_so_that=story_so_that, subtasks=subtasks,
+        )
+    except KeyError:
+        return _err(f"task {task_id} not found")
+    except Exception as e:
+        return _err(str(e))
+    return _ok({"task": _short_task(t), "subtasks": [_short_task(c) for c in created]})
 
 
 # ---------------------------------------------------------------------------

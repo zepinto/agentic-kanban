@@ -22,7 +22,9 @@ Config lives in ``KANBAN_WEBHOOKS_FILE`` (default: ``kanban_data/webhooks.json``
     }
 
 Supported events: ``task_created``, ``task_moved``, ``task_commented``,
-``task_updated``. The emitter is invoked from the corresponding endpoints
+``task_updated``, ``task_reported`` (an agent posted a report),
+``task_messaged`` (a message to an agent, or its reply) and
+``analysis_requested``. The emitter is invoked from the corresponding endpoints
 in ``main.py`` via ``emit_event(...)``.
 
 Hot-reload by file mtime. Every delivery runs as a fire-and-forget asyncio
@@ -49,7 +51,8 @@ import httpx
 
 log = logging.getLogger("kanban.automation.webhooks")
 
-VALID_EVENTS = {"task_created", "task_moved", "task_commented", "task_updated"}
+VALID_EVENTS = {"task_created", "task_moved", "task_commented", "task_updated",
+                "task_reported", "task_messaged", "analysis_requested"}
 VALID_FORMATS = {"generic", "slack", "telegram"}
 
 _status: dict[str, Any] = {
@@ -103,6 +106,14 @@ def _fmt_text(event: str, payload: dict[str, Any]) -> str:
             f"[comment] [{project}] {t.get('id', '?')} \"{title}\": "
             f"{payload.get('comment', '')[:120]}"
         )
+    if event == "task_reported":
+        return f"[report] [{project}] {t.get('id', '?')} \"{title}\": {payload.get('comment', '')[:120]}"
+    if event == "task_messaged":
+        kind = "reply" if payload.get("action") == "reply" else "message"
+        return (f"[{kind}] [{project}] {t.get('id', '?')} \"{title}\" "
+                f"{payload.get('actor', '')}: {payload.get('comment', '')[:120]}")
+    if event == "analysis_requested":
+        return f"[analysis] [{project}] {t.get('id', '?')} \"{title}\" sent to the analyst agent"
     if event == "task_updated":
         fields = payload.get("changed_fields") or []
         return f"[edit] [{project}] {t.get('id', '?')} \"{title}\" updated: {', '.join(fields) or '-'}"

@@ -63,8 +63,20 @@ if [[ -d "$HOME/.nvm/versions/node" ]]; then
 fi
 export LANG="${LANG:-en_US.UTF-8}"
 
-TASK_ID="${1:?usage: launch-claude.sh <task_id> [project_id]}"
+TASK_ID="${1:?usage: launch-claude.sh <task_id> [project_id] [work|analyse|resume]}"
 PROJECT_ID="${2:-}"
+# work    — an approved card: claim it, do it, finish in results (default)
+# analyse — a card in Analysis: the analyst agent refines it and picks the
+#           worker model (analysis_submit), on the project's analyst model,
+#           with read-only tools
+# resume  — you messaged a card whose agent has finished: resume that Claude
+#           Code session (--resume) so it reads and answers your messages
+MODE="${3:-work}"
+case "$MODE" in
+    work|analyse|resume) ;;
+    analyze) MODE=analyse ;;
+    *) echo "unknown mode '$MODE' (work|analyse|resume)" >&2; exit 1 ;;
+esac
 KANBAN_URL="${KANBAN_URL:-http://localhost:7777}"
 ACTOR="${KANBAN_LAUNCHER_ACTOR:-agent:launcher}"
 TIMEOUT="${AGENT_TIMEOUT_SEC:-3600}"
@@ -78,6 +90,7 @@ PY="$KANBAN_ROOT/.venv/bin/python"
 
 RUNS_DIR="${KANBAN_RUNS_DIR:-$HOME/Library/Logs/agent-kanban/runs}"
 RUN_DIR="$RUNS_DIR/$TASK_ID"
+[[ "$MODE" != "work" ]] && RUN_DIR="$RUNS_DIR/$TASK_ID-$MODE"
 mkdir -p "$RUN_DIR"
 LOG="$RUN_DIR/launcher.log"
 
@@ -121,7 +134,11 @@ card_status() {
 
 block() {  # reason — preflight only: the card was just seen in $STATUS
     log "BLOCK: $1"
-    move blocked "launcher: $1" "$STATUS"
+    if [[ "$MODE" == "work" ]]; then
+        move blocked "launcher: $1" "$STATUS"
+    else  # analysis and resume runs never move the card on their own
+        comment "launcher ($MODE): $1"
+    fi
 }
 
 # --- 1. preflight -----------------------------------------------------------
@@ -129,10 +146,19 @@ block() {  # reason — preflight only: the card was just seen in $STATUS
 TASK_JSON="$(api_get "/api/tasks/$TASK_ID?history_limit=0")" || {
     log "kanban not reachable at $KANBAN_URL"; exit 1; }
 STATUS="$(json_field "$TASK_JSON" status)"
-case "$STATUS" in
-    approved) ;;
-    *) log "card is in '$STATUS' now, not approved — nothing to do"; exit 0 ;;
+case "$MODE:$STATUS" in
+    work:approved) ;;
+    analyse:analysis|analyse:backlog) ;;
+    resume:cancelled) log "card is cancelled — not resuming"; exit 0 ;;
+    resume:*) ;;
+    *) log "card is in '$STATUS' now — nothing to do in $MODE mode"; exit 0 ;;
 esac
+SESSION_ID="$(json_field "$TASK_JSON" assigned_session_id)"
+[[ -z "$SESSION_ID" ]] && SESSION_ID="$(json_field "$TASK_JSON" origin_session_id)"
+if [[ "$MODE" == "resume" && -z "$SESSION_ID" ]]; then
+    log "no agent session recorded on the card — nothing to resume"
+    exit 0
+fi
 TITLE="$(json_field "$TASK_JSON" title)"
 DESC="$(json_field "$TASK_JSON" description)"
 ACCEPTANCE="$(json_field "$TASK_JSON" acceptance)"
@@ -142,14 +168,17 @@ TASK_TYPE="$(json_field "$TASK_JSON" type)"
 STORY_AS_A="$(json_field "$TASK_JSON" story_as_a)"
 STORY_I_WANT="$(json_field "$TASK_JSON" story_i_want)"
 STORY_SO_THAT="$(json_field "$TASK_JSON" story_so_that)"
-ANALYSIS="$(json_field "$TASK_JSON" analysis_md)"
+ANALYSIS_MD="$(json_field "$TASK_JSON" analysis_md)"
+ANALYSED_BY_BEFORE="$(json_field "$TASK_JSON" analysed_by)"
 [[ -z "$PROJECT_ID" ]] && PROJECT_ID="$(json_field "$TASK_JSON" project_id)"
 
-PROJ_PATH="$(api_get /api/projects | "$PY" -c '
+PROJ_JSON="$(api_get /api/projects | "$PY" -c '
 import json, sys
 ps = json.load(sys.stdin)["projects"]
 m = [p for p in ps if p["id"] == sys.argv[1]]
-print((m[0].get("path") or "") if m else "")' "$PROJECT_ID")"
+print(json.dumps(m[0] if m else {}))' "$PROJECT_ID")"
+PROJ_PATH="$(json_field "$PROJ_JSON" path)"
+ANALYST_MODEL="$(json_field "$PROJ_JSON" analyst_model)"
 if [[ -z "$PROJ_PATH" || ! -d "$PROJ_PATH" ]]; then
     block "project '$PROJECT_ID' has no existing directory (set it in the UI: ⋯ → Project directory)"
     exit 0
@@ -198,13 +227,28 @@ trap 'rm -rf "$LOCK"' EXIT
 
 MCP_ALIAS="agent-kanban"
 MCP_CONFIG="$RUN_DIR/mcp.json"
-"$PY" - "$MCP_CONFIG" "$KANBAN_ROOT" "$DB_PATH" "$PROJECT_ID" "$PY" "${CARD_MODEL:-}" <<'PYEOF'
+# The card's worker model (picked in Analysis, or the project default at
+# approval) wins; the size-based variables are a fallback for older cards.
+# The analyst runs on the project's analyst model.
+MODEL="$CARD_MODEL"
+[[ "$MODE" == "analyse" ]] && MODEL="${ANALYST_MODEL:-sonnet}"
+if [[ -z "$MODEL" ]]; then
+    case "$(echo "$SIZE" | tr '[:lower:]' '[:upper:]')" in
+        S) MODEL="${CLAUDE_MODEL_S:-}" ;;
+        L|XL) MODEL="${CLAUDE_MODEL_L:-}" ;;
+        *) MODEL="${CLAUDE_MODEL_M:-}" ;;
+    esac
+fi
+AGENT_ACTOR="claude"
+[[ "$MODE" == "analyse" ]] && AGENT_ACTOR="analyst"
+
+"$PY" - "$MCP_CONFIG" "$KANBAN_ROOT" "$DB_PATH" "$PROJECT_ID" "$PY" "${MODEL:-}" "$AGENT_ACTOR" <<'PYEOF'
 import json, sys
-out, root, db, project, py, model = sys.argv[1:7]
+out, root, db, project, py, model, actor = sys.argv[1:8]
 json.dump({"mcpServers": {"agent-kanban": {
     "type": "stdio", "command": py, "args": ["-m", "kanban_mcp"], "cwd": root,
     "env": {"PYTHONPATH": root, "KANBAN_DB": db, "KANBAN_PROJECT_ID": project,
-            "KANBAN_ACTOR": "claude", "KANBAN_AGENT_MODEL": model,
+            "KANBAN_ACTOR": actor, "KANBAN_AGENT_MODEL": model,
             "KANBAN_STARTED_BY": "hub"},
 }}}, open(out, "w"), indent=2)
 PYEOF
@@ -225,20 +269,14 @@ KANBAN_TOOLS=""
 for t in columns get history pull move comment link create update search my_active board blockers; do
     KANBAN_TOOLS="$KANBAN_TOOLS mcp__${MCP_ALIAS}__kanban_$t"
 done
-for t in task_propose session_register session_status inbox_get inbox_reply; do
+for t in task_propose session_register session_status inbox_get inbox_reply report_post analysis_submit; do
     KANBAN_TOOLS="$KANBAN_TOOLS mcp__${MCP_ALIAS}__$t"
 done
-ALLOWED="${KANBAN_ALLOWED_TOOLS:-Bash Read Edit Write Grep Glob TodoWrite}$KANBAN_TOOLS"
-
-# The card's worker model (picked in Analysis, or the project default at
-# approval) wins; the size-based variables are a fallback for older cards.
-MODEL="$CARD_MODEL"
-if [[ -z "$MODEL" ]]; then
-    case "$(echo "$SIZE" | tr '[:lower:]' '[:upper:]')" in
-        S) MODEL="${CLAUDE_MODEL_S:-}" ;;
-        L|XL) MODEL="${CLAUDE_MODEL_L:-}" ;;
-        *) MODEL="${CLAUDE_MODEL_M:-}" ;;
-    esac
+if [[ "$MODE" == "analyse" ]]; then
+    # the analyst reads the code base; it changes nothing
+    ALLOWED="${KANBAN_ANALYST_ALLOWED_TOOLS:-Read Grep Glob}$KANBAN_TOOLS"
+else
+    ALLOWED="${KANBAN_ALLOWED_TOOLS:-Bash Read Edit Write Grep Glob TodoWrite}$KANBAN_TOOLS"
 fi
 
 STORY=""
@@ -247,6 +285,8 @@ if [[ "$TASK_TYPE" == "story" || -n "$STORY_I_WANT" ]]; then
 fi
 
 PROMPT="$RUN_DIR/prompt.md"
+case "$MODE" in
+work)
 cat > "$PROMPT" <<EOF
 You're connected to agent-kanban via MCP (server "$MCP_ALIAS"). Take task $TASK_ID and complete it.
 
@@ -254,9 +294,13 @@ Workflow:
   1. kanban_pull(task_id="$TASK_ID") — claim it (approved -> in_progress).
   2. Plan, and write the plan as a comment via kanban_comment.
   3. Implement it. Along the way: kanban_comment for progress, kanban_link for PRs/files.
+     Post progress with report_post(title, summary_md, assets) when you have
+     something to show: Plotly figures, Mermaid diagrams, screenshots, SVG.
   4. Verify against the acceptance criteria. Claims of "done" must be backed by
-     command output (tests, a run), quoted in the final comment.
-  5. kanban_move(task_id="$TASK_ID", to_status="results", comment="<what was done, how it was verified>")
+     command output (tests, a run), quoted in your result.
+  5. report_post(task_id="$TASK_ID", final=true, title="<the finding>",
+     summary_md="<what was done, how it was verified, open issues>", assets=[...])
+     — this moves the card to Results.
   6. Stop. Do not move the card to "done" — a human reviews it in Results.
 
 Found follow-up work outside this card's scope? Do not do it: record it with
@@ -281,9 +325,54 @@ Acceptance criteria:
 $ACCEPTANCE
 
 Analysis notes:
-${ANALYSIS:-(none)}
+${ANALYSIS_MD:-(none)}
 === End ===
 EOF
+;;
+analyse)
+cat > "$PROMPT" <<EOF
+You're the analyst agent on agent-kanban (MCP server "$MCP_ALIAS"). Card $TASK_ID
+is waiting in Analysis. Do not change any files — read the code base to
+understand what the card really needs.
+
+  1. session_register(agent_name="analyst", task_id="$TASK_ID").
+  2. Read the card (kanban_get) and the relevant code.
+  3. Decide the scope, the approach, the risks and the files involved. Tighten
+     the acceptance criteria into a "- [ ] ..." checklist; sharpen the user
+     story if it is one. Split the card into subtasks only when it is clearly
+     more than one change.
+  4. Pick the worker model: "opus" for hard, cross-cutting or ambiguous work,
+     "sonnet" for most work, "haiku" for small, mechanical, well-specified work.
+  5. analysis_submit(task_id="$TASK_ID", analysis_md=..., agent_model=...,
+     model_rationale="<one line>", acceptance=..., subtasks=[...]).
+  6. Stop. The human approves the card; do not move it.
+
+If something only the human can answer blocks the analysis, ask with
+kanban_comment and finish with analysis_submit anyway, listing the open question.
+
+=== Task ===
+ID:     $TASK_ID
+Title:  $TITLE
+$STORY
+
+Description:
+$DESC
+
+Acceptance criteria:
+$ACCEPTANCE
+=== End ===
+EOF
+;;
+resume)
+cat > "$PROMPT" <<EOF
+You have new messages from the human on the kanban board about card $TASK_ID
+(it is in '$STATUS' now). Call inbox_get, act on each message, and answer each
+with inbox_reply. If they ask for changes, make them, verify, and post a new
+result with report_post(final=true) — that moves the card back to Results.
+Do not move the card to "done".
+EOF
+;;
+esac
 
 # --- 4. run the agent with a hard timeout -----------------------------------
 
@@ -292,6 +381,7 @@ CMD=("$CLAUDE" -p "$(cat "$PROMPT")" --output-format json
      --allowedTools $ALLOWED)
 [[ "$STRICT_MCP" == "1" ]] && CMD+=(--strict-mcp-config)
 [[ -n "$MODEL" ]] && CMD+=(--model "$MODEL")
+[[ "$MODE" == "resume" ]] && CMD+=(--resume "$SESSION_ID")
 
 RESULT="$RUN_DIR/result.json"
 AGENT_LOG="$RUN_DIR/agent.log"
@@ -402,11 +492,25 @@ if [[ "$VERDICT" == "LIMIT" ]]; then
     exit 75
 fi
 
-case "$NOW" in
-    approved|in_progress)
-        block_if_working "$NOW" "agent exited (rc=$RC, $SUMMARY) but left the card in '$NOW'. Log: $RUN_DIR — $LAST_WORDS"
-        exit 0 ;;
-esac
+if [[ "$MODE" == "analyse" ]]; then
+    AFTER_BY="$(json_field "$(api_get "/api/tasks/$TASK_ID?history_limit=0" 2>/dev/null || echo '{}')" analysed_by)"
+    if [[ "$AFTER_BY" == "$ANALYSED_BY_BEFORE" ]]; then
+        comment "launcher (analyse): the analyst finished without submitting an analysis (rc=$RC, $SUMMARY). Log: $RUN_DIR — $LAST_WORDS"
+    else
+        comment "launcher (analyse): analysis submitted by $AFTER_BY ($SUMMARY)."
+    fi
+    exit 0
+fi
+
+# A resumed agent that only answered a comment on a finished card leaves it
+# where it was; block only when it was meant to work and stopped half-way.
+if [[ "$MODE" == "work" || "$STATUS" == "in_progress" ]]; then
+    case "$NOW" in
+        approved|in_progress)
+            block_if_working "$NOW" "agent exited (rc=$RC, $SUMMARY) but left the card in '$NOW'. Log: $RUN_DIR — $LAST_WORDS"
+            exit 0 ;;
+    esac
+fi
 
 if [[ ( "$NOW" == "results" || "$NOW" == "testing" ) && -n "${KANBAN_GATE_CMD:-}" ]]; then
     log "gate: $KANBAN_GATE_CMD"
@@ -417,5 +521,5 @@ if [[ ( "$NOW" == "results" || "$NOW" == "testing" ) && -n "${KANBAN_GATE_CMD:-}
     comment "launcher: gate passed — \`$KANBAN_GATE_CMD\` ($(tail -1 "$RUN_DIR/gate.log" | cut -c1-200))"
 fi
 
-comment "launcher: agent run finished in '$NOW' ($SUMMARY)."
+comment "launcher ($MODE): agent run finished in '$NOW' ($SUMMARY)."
 exit 0

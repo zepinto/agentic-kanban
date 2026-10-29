@@ -1193,6 +1193,72 @@ class Store(ReportsMixin):
         assert t is not None
         return t
 
+    def request_analysis(self, task_id: str, *, actor: str) -> tuple[Task, str]:
+        """Hand a card to the analyst agent: move it to Analysis (from Backlog
+        or Blocked) and record ``analysis_requested`` — the event a
+        ``task_event`` rule turns into an analyst run. Returns the card and the
+        project's analyst model."""
+        t = self.get_task(task_id, history_limit=0)
+        if t is None:
+            raise KeyError(task_id)
+        if t.status not in ("backlog", "analysis", "blocked"):
+            raise ValueError(f"{task_id} is in '{t.status}': analysis is for cards before approval")
+        if t.status != "analysis":
+            self.move_task(task_id, "analysis", actor=actor, comment="sent to the analyst agent")
+        proj = self.get_project(t.project_id)
+        model = (proj.analyst_model if proj else None) or DEFAULT_AGENT_MODEL
+        with self._lock:
+            self._insert_history(task_id, _now(), actor, "analysis_requested", None, None,
+                                 f"analyst model: {model}")
+        t = self.get_task(task_id, history_limit=0)
+        assert t is not None
+        return t, model
+
+    def submit_analysis(
+        self,
+        task_id: str,
+        *,
+        actor: str,
+        analysis_md: str,
+        agent_model: str,
+        model_rationale: str = "",
+        acceptance: str | None = None,
+        story_as_a: str | None = None,
+        story_i_want: str | None = None,
+        story_so_that: str | None = None,
+        subtasks: list[dict[str, Any]] | None = None,
+    ) -> tuple[Task, list[Task]]:
+        """What an analyst agent hands back: notes, criteria, the worker model
+        and its reason, optional subtasks (created in Analysis as children).
+        The card stays in Analysis for the human to approve."""
+        if not (analysis_md or "").strip():
+            raise ValueError("analysis_md must not be empty")
+        if normalize_model(agent_model) is None:
+            raise ValueError(f"agent_model must be one of {', '.join(AGENT_MODELS)}")
+        parent = self.get_task(task_id, history_limit=0)
+        if parent is None:
+            raise KeyError(task_id)
+        subs = list(subtasks or [])
+        for i, st in enumerate(subs):
+            if not isinstance(st, dict) or not str(st.get("title") or "").strip():
+                raise ValueError(f"subtasks[{i}] needs a title")
+        t = self.update_fields(
+            task_id, actor=actor, analysis_md=analysis_md, agent_model=agent_model,
+            model_rationale=model_rationale, acceptance=acceptance, story_as_a=story_as_a,
+            story_i_want=story_i_want, story_so_that=story_so_that, analysed_by=actor,
+        )
+        created = []
+        for st in subs:
+            created.append(self.create_task(
+                str(st["title"]), status="analysis", project_id=parent.project_id,
+                description=str(st.get("description") or ""),
+                acceptance=str(st.get("acceptance") or ""),
+                size=str(st.get("size") or "M"), parent_id=task_id, origin="agent",
+                origin_task_id=task_id, agent_model=st.get("agent_model") or None,
+                actor=actor,
+            ))
+        return t, created
+
     def archive_task(
         self, task_id: str, *, archived: bool = True, actor: str = "user",
         comment: str | None = None,

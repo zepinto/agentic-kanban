@@ -12,8 +12,11 @@ Row → event mapping:
 
     create                     → task_created    (+ reactive rules, from_status=None)
     move                       → task_moved      (+ reactive rules)
-    comment                    → task_commented
+    comment                    → task_commented  (+ task_event rules)
     update/assign/archive/...  → task_updated    (changed_fields)
+    report                     → task_reported   (+ task_event rules)
+    message / reply            → task_messaged   (+ task_event rules)
+    analysis_requested         → analysis_requested (+ task_event rules)
 
 Events are dispatched in history order. The feed starts at the newest row
 when the server boots — changes made while the server was down are not
@@ -45,7 +48,14 @@ EVENT_FOR_ACTION = {
     "assign": "task_updated",
     "archive": "task_updated",
     "unarchive": "task_updated",
+    "report": "task_reported",
+    "message": "task_messaged",
+    "reply": "task_messaged",
+    "analysis_requested": "analysis_requested",
 }
+
+# History actions reactive ``task_event`` rules can listen to.
+TASK_EVENT_ACTIONS = {"comment", "report", "message", "reply", "analysis_requested"}
 
 # History rows included in event payloads (full history can be huge).
 HISTORY_IN_PAYLOAD = 20
@@ -133,8 +143,9 @@ class EventFeed:
             payload.update(
                 from_status=row.from_status, to_status=row.to_status, comment=row.comment
             )
-        elif event == "task_commented":
+        elif event in ("task_commented", "task_reported", "task_messaged", "analysis_requested"):
             payload["comment"] = row.comment
+            payload["action"] = row.action
         elif event == "task_updated":
             payload["changed_fields"] = changed_fields(row)
         if row.actor in quiet:
@@ -151,6 +162,8 @@ class EventFeed:
                 **payload, "from_status": None, "to_status": row.to_status,
                 "comment": None,
             })
+        if row.action in TASK_EVENT_ACTIONS:
+            emit_rule_event("task_event", {**payload, "action": row.action, "comment": row.comment})
         _status["dispatched_total"] += 1
         _status["last_event_at"] = row.ts
 
