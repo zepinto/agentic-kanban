@@ -34,6 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .reports import ReportsMixin
+
 # ============================================================================
 # Status model
 # ============================================================================
@@ -303,6 +305,9 @@ class Input:
     delivered_at: str | None
     acked_at: str | None
     agent_name: str | None = None   # recipient's display name, when known
+    report_id: int | None = None    # the report this message comments on
+    asset_id: int | None = None     # the figure in it
+    about: str | None = None        # human-readable anchor: report title / figure caption
 
     def to_public(self) -> dict[str, Any]:
         return asdict(self)
@@ -362,7 +367,7 @@ def normalize_links(links: Iterable[Any] | None) -> list[tuple[str, str]]:
     return out
 
 
-class Store:
+class Store(ReportsMixin):
     """Thread-safe wrapper around SQLite. One instance per process."""
 
     _lock = threading.RLock()
@@ -378,6 +383,10 @@ class Store:
                 "(the web server creates the database on its first start)"
             )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # report assets live next to the database unless KANBAN_ASSETS_DIR says otherwise
+        assets_env = os.environ.get("KANBAN_ASSETS_DIR", "").strip()
+        self.assets_dir = (Path(os.path.expanduser(assets_env)) if assets_env
+                           else self.db_path.parent / "kanban_assets")
         self._conn = sqlite3.connect(
             str(self.db_path),
             check_same_thread=False,
@@ -447,6 +456,10 @@ class Store:
             if name not in pcols:
                 self._conn.execute(f"ALTER TABLE projects ADD COLUMN {name} {ddl}")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id)")
+        icols = {r[1] for r in self._conn.execute("PRAGMA table_info(inputs)").fetchall()}
+        for name in ("report_id", "asset_id"):
+            if name not in icols:
+                self._conn.execute(f"ALTER TABLE inputs ADD COLUMN {name} INTEGER")
         if self._schema_version() < 6:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1481,16 +1494,34 @@ class Store:
         task_id: str | None = None,
         kind: str = "instruction",
         parent_id: int | None = None,
+        report_id: int | None = None,
+        asset_id: int | None = None,
     ) -> Input:
         """Queue a message for an agent. Addressed to a session, a card (the
         card's agent, resolved now — or later, by whoever claims it), or both.
-        A message about a card is also written to the card's history."""
+        ``report_id`` / ``asset_id`` anchor it to a report or one figure in it
+        (the card and the posting agent are taken from the report). A message
+        about a card is also written to the card's history."""
         body = (body or "").strip()
         if not body:
             raise ValueError("message text must not be empty")
         kind = normalize_choice(kind, INPUT_KINDS, "message kind")
         session_id = (session_id or "").strip() or None
         task_id = (task_id or "").strip() or None
+        if asset_id is not None:
+            asset = self.get_asset(asset_id)
+            if asset is None:
+                raise KeyError(f"asset {asset_id}")
+            report_id = asset.report_id
+        if report_id is not None:
+            rep_ = self.get_report(report_id)
+            if rep_ is None:
+                raise KeyError(f"report {report_id}")
+            task_id = task_id or rep_.task_id
+            if session_id is None and rep_.session_id and self.get_session(rep_.session_id):
+                session_id = rep_.session_id
+            if kind == "instruction":
+                kind = "comment"
         if session_id is None and task_id is None:
             raise ValueError("a message needs a session_id or a task_id")
         ts = _now()
@@ -1505,14 +1536,17 @@ class Store:
             try:
                 cur = self._conn.execute(
                     """INSERT INTO inputs (session_id, task_id, kind, body, author,
-                                           parent_id, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (session_id, task_id, kind, body, author or "user", parent_id, ts),
+                                           parent_id, report_id, asset_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (session_id, task_id, kind, body, author or "user", parent_id,
+                     report_id, asset_id, ts),
                 )
                 iid = cur.lastrowid
                 if task_id is not None:
                     who = self._agent_name(session_id)
-                    note = f"to {who}: {body}" if who else f"(waiting for an agent): {body}"
+                    about = self._input_about(report_id, asset_id)
+                    lead = f"to {who}" if who else "(waiting for an agent)"
+                    note = f"{lead}{f' on {about}' if about else ''}: {body}"
                     self._insert_history(task_id, ts, author or "user", "message", None, None, note)
                 self._conn.execute("COMMIT")
             except Exception:
@@ -1651,7 +1685,31 @@ class Store:
             delivered_at=row["delivered_at"],
             acked_at=row["acked_at"],
             agent_name=self._agent_name(row["session_id"]),
+            report_id=row["report_id"] if "report_id" in row.keys() else None,
+            asset_id=row["asset_id"] if "asset_id" in row.keys() else None,
+            about=self._input_about(
+                row["report_id"] if "report_id" in row.keys() else None,
+                row["asset_id"] if "asset_id" in row.keys() else None,
+            ),
         )
+
+    def _input_about(self, report_id: int | None, asset_id: int | None) -> str | None:
+        """'figure “Bias vs time” in “Drift study”' / 'report “Drift study”'."""
+        if report_id is None and asset_id is None:
+            return None
+        if asset_id is not None:
+            row = self._conn.execute(
+                "SELECT a.caption, a.type, a.position, r.title FROM report_assets a "
+                "JOIN reports r ON r.id = a.report_id WHERE a.id=?", (asset_id,),
+            ).fetchone()
+            if row:
+                name = row["caption"] or f"{row['type']} #{row['position'] + 1}"
+                return f"figure “{name}” in report “{row['title']}”"
+        if report_id is not None:
+            row = self._conn.execute("SELECT title FROM reports WHERE id=?", (report_id,)).fetchone()
+            if row:
+                return f"report “{row['title']}”"
+        return None
 
     def _row_to_session(self, row: sqlite3.Row) -> Session:
         status = row["status"]

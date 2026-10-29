@@ -336,8 +336,10 @@ def restore_archived(db: Path, *, apply: bool, backup_dir: Path | None = None) -
 def vacuum(db: Path) -> dict[str, Any]:
     conn = _connect(db)
     try:
-        before = db.stat().st_size
+        # fold the write-ahead log into the file first, or "before" misses
+        # pages that only live in the -wal file and "after" looks bigger
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        before = db.stat().st_size
         conn.execute("VACUUM")
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         after = db.stat().st_size

@@ -66,6 +66,8 @@ Tools:
 * ``session_status``   — report status / current card / a short note
 * ``inbox_get``        — read the human's messages to this session (can wait)
 * ``inbox_reply``      — answer a message; the reply shows on the card
+* ``report_post``      — post a progress update or a final result with figures
+  (mermaid diagrams, Plotly charts, snapshots, SVG, files)
 
 Changes made here land in ``task_history``; the web server's event feed
 picks them up within about a second, so automation rules and webhooks fire
@@ -823,7 +825,8 @@ def inbox_get(wait_seconds: int = 0) -> dict[str, Any]:
     return _ok({
         "messages": [
             {"id": m.id, "kind": m.kind, "text": m.body, "from": m.author,
-             "task_id": m.task_id, "sent_at": m.created_at}
+             "task_id": m.task_id, "about": m.about, "report_id": m.report_id,
+             "asset_id": m.asset_id, "sent_at": m.created_at}
             for m in msgs
         ],
         "count": len(msgs),
@@ -847,6 +850,122 @@ def inbox_reply(input_id: int, text: str, done: bool = True, actor: str | None =
     except Exception as e:
         return _err(str(e))
     return _ok({"reply_id": r.id, "task_id": r.task_id})
+
+
+def _resolve_path(p: str) -> str:
+    """Agent paths are relative to the agent's working directory, not this
+    server's (Claude Code starts MCP servers in the kanban repo)."""
+    p = os.path.expanduser(p)
+    if os.path.isabs(p):
+        return p
+    base = os.environ.get("CLAUDE_PROJECT_DIR") or os.environ.get("PWD") or os.getcwd()
+    return os.path.join(base, p)
+
+
+def _asset_spec(a: Any, i: int) -> dict[str, Any]:
+    import base64
+    import binascii
+
+    if not isinstance(a, dict):
+        raise ValueError(f"assets[{i}] must be an object with a 'type'")
+    unknown = set(a) - {"type", "caption", "path", "source", "figure", "data_base64", "filename"}
+    if unknown:
+        raise ValueError(f"assets[{i}]: unknown key(s) {sorted(unknown)}; use type, caption and "
+                         "one of path / source / figure / data_base64")
+    spec: dict[str, Any] = {"type": a.get("type"), "caption": a.get("caption") or "",
+                            "filename": a.get("filename")}
+    if a.get("figure") is not None:
+        spec["figure"] = a["figure"]
+    if a.get("source") is not None:
+        spec["text"] = str(a["source"])
+    if a.get("data_base64"):
+        try:
+            spec["data"] = base64.b64decode(a["data_base64"], validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError(f"assets[{i}].data_base64 is not valid base64") from None
+    if a.get("path"):
+        path = _resolve_path(str(a["path"]))
+        if path.lower().endswith((".html", ".htm")) and str(a.get("type")).lower() == "plotly":
+            raise ValueError(f"assets[{i}]: post the Plotly figure as JSON (fig.write_json / "
+                             "fig.to_json()), not HTML")
+        try:
+            with open(path, "rb") as fh:
+                spec["data"] = fh.read()
+        except OSError as e:
+            raise ValueError(f"assets[{i}].path: cannot read {path}: {e.strerror}") from None
+        spec["filename"] = spec.get("filename") or os.path.basename(path)
+    if not any(k in spec for k in ("figure", "text", "data")):
+        raise ValueError(f"assets[{i}] needs a body: path, source, figure or data_base64")
+    return spec
+
+
+@mcp.tool()
+def report_post(
+    title: str,
+    summary_md: str = "",
+    task_id: str | None = None,
+    final: bool = False,
+    assets: list[dict[str, Any]] | None = None,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Post a report on a card: a progress update, or (final=true) your
+    result, which moves the card to Results for the human's review.
+
+    Args:
+        title: one line — the finding, e.g. "Heading drift halved with online bias".
+        summary_md: Markdown: what you did, how you verified it, open issues.
+            ```mermaid fences in it are drawn as diagrams.
+        task_id: default = the card this session holds.
+        final: true for the result of the card (moves it to Results).
+        assets: figures, in order. Each is {"type", "caption", <body>} where
+            type is one of:
+              "mermaid"  — body "source": Mermaid text (flowchart, sequence, gantt, …)
+              "plotly"   — body "figure": a Plotly figure dict ({"data": [...],
+                           "layout": {...}}), or "path" to fig.write_json() output
+              "snapshot" — an image (PNG/JPEG/GIF/WebP: screenshots, saved plots):
+                           body "path" (absolute is safest) or "data_base64"
+              "svg"      — a generic SVG drawing: body "path" or "source"
+              "file"     — anything else to download: "path" or "data_base64"
+            The human can comment on each figure; comments reach you via inbox_get.
+    """
+    who = _actor(actor)
+    store = _get_store()
+    sid = _session_id()
+    tid = (task_id or "").strip() or None
+    if tid is None and sid:
+        sess = store.get_session(sid)
+        tid = sess.current_task_id if sess else None
+    if tid is None:
+        return _err("task_id is required (this session holds no card)")
+    try:
+        specs = [_asset_spec(a, i) for i, a in enumerate(assets or [])]
+    except ValueError as e:
+        return _err(str(e))
+    if final:
+        denied = _check_agent_may_use("results")
+        if denied:
+            return _err(denied)
+    try:
+        r = store.create_report(tid, title, author=who, kind="result" if final else "progress",
+                                summary_md=summary_md, session_id=sid, assets=specs)
+        moved = False
+        if final:
+            t = store.get_task(tid, history_limit=0)
+            if t and t.status != "results":
+                store.move_task(tid, "results", actor=who, comment=f"result: {title}")
+                moved = True
+    except KeyError:
+        return _err(f"task {tid} not found")
+    except Exception as e:
+        return _err(str(e))
+    return _ok({
+        "report_id": r.id,
+        "task_id": tid,
+        "kind": r.kind,
+        "assets": [{"id": a.id, "type": a.type, "caption": a.caption} for a in r.assets],
+        "moved_to_results": moved,
+        "url": _url(tid),
+    })
 
 
 # ---------------------------------------------------------------------------

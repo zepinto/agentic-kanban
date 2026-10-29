@@ -62,6 +62,8 @@ def _render(msgs: list[dict[str, Any]]) -> str:
     lines = ["Messages from the human on the kanban board:"]
     for m in msgs:
         about = f" about {m['task_id']}" if m.get("task_id") else ""
+        if m.get("about"):
+            about += f", on {m['about']}"
         lines.append(f"- [#{m['id']} {m['kind']}{about}] {m['body']}")
     lines.append(
         "Act on these now. Answer each with inbox_reply(input_id=<#id>, text=...) "

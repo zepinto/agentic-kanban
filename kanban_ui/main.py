@@ -27,6 +27,12 @@ Endpoints:
     POST   /api/sessions/{id}/messages — message an agent session directly
     GET    /api/tasks/{id}/messages   — messages and replies on a card
     GET    /api/sessions/{id}/inbox   — unread messages (hooks; marks them read)
+    POST   /api/tasks/{id}/reports    — post a progress / result report with assets
+    GET    /api/tasks/{id}/reports    — a card's reports, newest first
+    GET    /api/reports/{id}          — one report
+    POST   /api/reports/{id}/review   — accept / request changes (humans only)
+    GET    /api/reports?project=      — gallery: visual assets of result reports
+    GET    /api/assets/{id}           — asset body (mermaid / plotly / image / svg / file)
     GET    /api/automation/status     — inbox / rules / events / webhooks
     POST   /api/automation/pause      — pause or resume automation rules
 
@@ -48,7 +54,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -276,6 +282,31 @@ class MessageRequest(_Strict):
     kind: str = Field("instruction", description="instruction / comment / feedback / answer / stop")
     task_id: str | None = Field(None, description="card the message is about (session messages)")
     parent_id: int | None = Field(None, description="message this one answers")
+    report_id: int | None = Field(None, description="report the message comments on")
+    asset_id: int | None = Field(None, description="figure (asset) the message comments on")
+
+
+class AssetIn(_Strict):
+    type: str = Field(..., description="mermaid / plotly / snapshot / svg / file")
+    caption: str = ""
+    text: str | None = Field(None, description="mermaid source, Plotly JSON or SVG markup")
+    figure: dict[str, Any] | None = Field(None, description="Plotly figure object")
+    data_base64: str | None = Field(None, description="image / svg / file bytes, base64")
+    filename: str | None = None
+
+
+class ReportCreate(_Strict):
+    title: str
+    summary_md: str = ""
+    kind: str = Field("progress", description="progress or result")
+    final: bool = Field(False, description="result report that moves the card to Results")
+    session_id: str | None = None
+    assets: list[AssetIn] = Field(default_factory=list)
+
+
+class ReviewRequest(_Strict):
+    decision: str = Field(..., description="accept or changes")
+    comment: str = ""
 
 
 class SessionStatus(_Strict):
@@ -409,6 +440,7 @@ def get_board(
                 or sess.status == "waiting_input" else "live"
     by_status: dict[str, list[dict[str, Any]]] = {s: [] for s in STATUSES}
     tasks = _store.list_tasks(project_id=project, include_archived=include_archived)
+    reports = _store.report_summary([t.id for t in tasks])
     for t in tasks:
         by_status[t.status].append(
             {
@@ -436,6 +468,10 @@ def get_board(
                 "running": running.get(t.id, []),
                 # "live" — an agent is writing on it now; "waiting" — it asks you
                 "activity": live.get(t.id) or ("live" if running.get(t.id) else None),
+                # reports: count, latest review state, thumbnail of the latest figure
+                "reports": (reports.get(t.id) or {}).get("reports", 0),
+                "review_status": (reports.get(t.id) or {}).get("review_status"),
+                "thumb": (reports.get(t.id) or {}).get("thumb"),
             }
         )
     archived_count = 0
@@ -1059,7 +1095,8 @@ def message_task(
     try:
         m = _store.send_input(
             req.text, author=_actor(x_kanban_actor, x_kanban_via), task_id=task_id,
-            kind=req.kind, parent_id=req.parent_id,
+            kind=req.kind, parent_id=req.parent_id, report_id=req.report_id,
+            asset_id=req.asset_id,
         )
     except KeyError:
         raise HTTPException(404, f"task {task_id} not found")
@@ -1091,6 +1128,7 @@ def message_session(
         m = _store.send_input(
             req.text, author=_actor(x_kanban_actor, x_kanban_via), session_id=session_id,
             task_id=req.task_id, kind=req.kind, parent_id=req.parent_id,
+            report_id=req.report_id, asset_id=req.asset_id,
         )
     except KeyError as e:
         raise HTTPException(404, f"not found: {e.args[0] if e.args else session_id}")
@@ -1110,6 +1148,129 @@ def session_inbox(
         raise HTTPException(404, f"session {session_id} not found")
     msgs = _store.inbox(session_id, mark_delivered=mark_delivered)
     return {"messages": [m.to_public() for m in msgs], "count": len(msgs)}
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/tasks/{task_id}/reports", status_code=201)
+def post_report(
+    task_id: str, req: ReportCreate, x_kanban_actor: str | None = Header(None),
+    x_kanban_via: str | None = Header(None, include_in_schema=False),
+) -> dict[str, Any]:
+    """Post a progress update or a result. Assets carry their body as
+    ``text`` (mermaid, Plotly JSON, SVG), ``figure`` (Plotly) or
+    ``data_base64`` (images, SVG, files). ``final: true`` posts a result and
+    moves the card to Results."""
+    import base64
+    import binascii
+
+    kind = "result" if req.final else req.kind
+    if req.final:
+        _guard_agent_status("results", x_kanban_via)
+    specs = []
+    for i, a in enumerate(req.assets):
+        spec: dict[str, Any] = {"type": a.type, "caption": a.caption, "text": a.text,
+                                "figure": a.figure, "filename": a.filename}
+        if a.data_base64:
+            try:
+                spec["data"] = base64.b64decode(a.data_base64, validate=True)
+            except (binascii.Error, ValueError):
+                raise HTTPException(400, f"assets[{i}].data_base64 is not valid base64")
+        specs.append(spec)
+    actor = _actor(x_kanban_actor, x_kanban_via)
+    try:
+        r = _store.create_report(task_id, req.title, author=actor, kind=kind,
+                                 summary_md=req.summary_md, session_id=req.session_id,
+                                 assets=specs)
+        if req.final:
+            t = _store.get_task(task_id, history_limit=0)
+            if t and t.status != "results":
+                _store.move_task(task_id, "results", actor=actor, comment=f"result: {req.title}")
+    except KeyError:
+        raise HTTPException(404, f"task {task_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _kick()
+    return r.to_public()
+
+
+@app.get("/api/tasks/{task_id}/reports")
+def task_reports(task_id: str) -> dict[str, Any]:
+    if _store.get_task(task_id, history_limit=0) is None:
+        raise HTTPException(404, f"task {task_id} not found")
+    return {"reports": [r.to_public() for r in _store.list_reports(task_id)]}
+
+
+@app.get("/api/reports/{report_id}")
+def get_report(report_id: int) -> dict[str, Any]:
+    r = _store.get_report(report_id)
+    if r is None:
+        raise HTTPException(404, f"report {report_id} not found")
+    return r.to_public()
+
+
+@app.post("/api/reports/{report_id}/review")
+def review_report(
+    report_id: int, req: ReviewRequest, x_kanban_actor: str | None = Header(None),
+    x_kanban_via: str | None = Header(None, include_in_schema=False),
+) -> dict[str, Any]:
+    """Accept a result (card → Done) or request changes (card → In
+    progress; the comment is sent to the agent). Reviews are the human's."""
+    if x_kanban_via == MCP_VIA:
+        raise HTTPException(403, "reviewing results is reserved for a human")
+    try:
+        r = _store.review_report(report_id, req.decision, actor=_actor(x_kanban_actor, x_kanban_via),
+                                 comment=req.comment)
+    except KeyError:
+        raise HTTPException(404, f"report {report_id} not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _kick()
+    return r.to_public()
+
+
+@app.get("/api/reports")
+def gallery(
+    project: str = Query(..., description="project slug"),
+    kind: str = Query("result", description="result, progress, or all"),
+    limit: int = Query(200, ge=1, le=1000),
+) -> dict[str, Any]:
+    """Visual assets (snapshots, SVG, Plotly, Mermaid) of a project's reports, newest first."""
+    if _store.get_project(project) is None:
+        raise HTTPException(404, f"project {project} not found")
+    items = _store.list_project_assets(project, kind=None if kind == "all" else kind, limit=limit)
+    return {"assets": items}
+
+
+# A sandbox for anything served from the board's origin that we did not write:
+# SVG can carry scripts, so it is never inlined into the page (the UI shows it
+# with <img>) and, opened directly, this policy keeps scripts from running.
+_ASSET_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox"
+
+
+@app.get("/api/assets/{asset_id}")
+def get_asset(asset_id: int, download: bool = Query(False)) -> FileResponse:
+    a = _store.get_asset(asset_id)
+    if a is None:
+        raise HTTPException(404, f"asset {asset_id} not found")
+    path = _store.asset_file(a)
+    if not path.exists():
+        raise HTTPException(410, f"asset {asset_id} body is missing from the assets directory")
+    attach = download or a.type == "file"
+    headers = {
+        "Content-Security-Policy": _ASSET_CSP,
+        "X-Content-Type-Options": "nosniff",
+        # content-addressed: the body behind an id never changes
+        "Cache-Control": "private, max-age=31536000, immutable",
+    }
+    return FileResponse(
+        path, media_type=a.mime, headers=headers,
+        filename=a.filename or None,
+        content_disposition_type="attachment" if attach else "inline",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1390,6 +1551,9 @@ _MCP_EXCLUDED = [
         # write files into the project directory / store a git token
         or r.path.startswith("/api/projects/{project_id}/source")
         or r.path == "/api/projects/{project_id}/connect"
+        # human review, and binary asset bodies (useless as tool output)
+        or r.path == "/api/reports/{report_id}/review"
+        or r.path == "/api/assets/{asset_id}"
         # creating/repointing projects: project.path is where the agent
         # launcher runs `claude` with shell access
         or (r.path.startswith("/api/projects") and not r.methods <= {"GET", "HEAD"})

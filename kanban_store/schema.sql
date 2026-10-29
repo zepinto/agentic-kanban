@@ -137,6 +137,8 @@ CREATE TABLE IF NOT EXISTS inputs (
     body          TEXT NOT NULL,
     author        TEXT NOT NULL,                 -- user / agent name
     parent_id     INTEGER REFERENCES inputs(id) ON DELETE SET NULL,  -- thread root for replies
+    report_id     INTEGER,                       -- comment on a report …
+    asset_id      INTEGER,                       -- … or on one figure in it
     created_at    TEXT NOT NULL,
     delivered_at  TEXT,                          -- the agent read it
     acked_at      TEXT                           -- the agent replied / handled it
@@ -144,6 +146,40 @@ CREATE TABLE IF NOT EXISTS inputs (
 
 CREATE INDEX IF NOT EXISTS idx_inputs_session ON inputs(session_id, delivered_at);
 CREATE INDEX IF NOT EXISTS idx_inputs_task ON inputs(task_id, id);
+
+-- v6: reports agents post on a card (progress updates and final results)
+-- and their assets (mermaid / plotly / snapshot / svg / file). Asset bodies
+-- are files under the assets directory, named by SHA-256.
+CREATE TABLE IF NOT EXISTS reports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    session_id      TEXT,
+    author          TEXT NOT NULL,
+    kind            TEXT NOT NULL DEFAULT 'progress',  -- progress | result
+    title           TEXT NOT NULL,
+    summary_md      TEXT NOT NULL DEFAULT '',
+    review_status   TEXT,                -- result: submitted/accepted/changes_requested/superseded
+    review_comment  TEXT,
+    reviewed_at     TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reports_task ON reports(task_id, id);
+
+CREATE TABLE IF NOT EXISTS report_assets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id   INTEGER NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
+    position    INTEGER NOT NULL DEFAULT 0,
+    type        TEXT NOT NULL,                   -- mermaid/plotly/snapshot/svg/file
+    caption     TEXT NOT NULL DEFAULT '',
+    mime        TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    filename    TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_assets_report ON report_assets(report_id, position);
 
 -- meta for migrations
 CREATE TABLE IF NOT EXISTS meta (
