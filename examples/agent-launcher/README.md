@@ -42,7 +42,7 @@ why instead of sitting in Analyst forever.
    list (`["web", "api"]`) instead of three copies of the same rule.
 
 3. **Test**: create a task in the backlog → drag it into `Approved` → within
-   a few seconds the card shows `▶ agent` and moves to `analyst`.
+   a few seconds the card shows `▶ agent` and moves to `in_progress`; the agent runs on the card's model (picked in Analysis, or the project default).
 
 It fires no matter who moves the card: a drag-drop, an MCP agent, a script
 calling the REST API, or a card created directly in Approved.
@@ -67,11 +67,11 @@ calling the REST API, or a card created directly in Approved.
 4. **Hard timeout** (`AGENT_TIMEOUT_SEC`, default 3600): a live process is
    not proof of progress.
 5. **Afterwards** — whatever is still running in the agent's process group
-   is stopped. If the agent left the card in approved / analyst /
+   is stopped. If the agent left the card in approved /
    in_progress, the launcher blocks it with the exit code, the agent's last
    words and the run folder (only if the card is still where it was — a
    card a human has moved meanwhile just gets a comment). With
-   `KANBAN_GATE_CMD` set (say `pytest -q`), a card in testing must also pass
+   `KANBAN_GATE_CMD` set (say `pytest -q`), a card in results must also pass
    the gate.
 
 Everything for one card lives in `~/Library/Logs/agent-kanban/runs/T-XXX/`:
@@ -110,11 +110,11 @@ Set these in the rule's `"env"` object.
 | `KANBAN_LAUNCHER_ACTOR` | `agent:launcher` | name in the card history |
 | `AGENT_TIMEOUT_SEC` | `3600` | hard limit per run |
 | `CLAUDE_BIN` | auto | path to the `claude` CLI |
-| `CLAUDE_MODEL_S` / `_M` / `_L` | CLI default | model by card size, e.g. a small model for S cards |
+| `CLAUDE_MODEL_S` / `_M` / `_L` | CLI default | fallback model by card size, used only when the card has no `agent_model` (opus / sonnet / haiku, chosen in Analysis) |
 | `KANBAN_PERMISSION_MODE` | `dontAsk` | `acceptEdits` / `bypassPermissions` if you know why |
 | `KANBAN_ALLOWED_TOOLS` | `Bash Read Edit Write Grep Glob TodoWrite` | tools besides the kanban ones |
 | `KANBAN_STRICT_MCP` | `1` | `0` also loads the project's own `.mcp.json` servers |
-| `KANBAN_GATE_CMD` | — | command that must pass before a card stays in testing |
+| `KANBAN_GATE_CMD` | — | command that must pass before a card stays in results |
 | `KANBAN_RUNS_DIR` | `~/Library/Logs/agent-kanban/runs` | per-card run folders |
 
 ## Supported placeholders

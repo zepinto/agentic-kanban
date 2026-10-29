@@ -19,7 +19,7 @@
 # knows the launch is alive (one run per card, max_concurrent queueing).
 #
 # What it does, in order:
-#   1. Preflight: board reachable, card still in approved/analyst, `claude`
+#   1. Preflight: board reachable, card still in approved, `claude`
 #      found and logged in. A failed preflight blocks the card with the reason
 #      instead of failing silently in a log nobody reads.
 #   2. Per-card lock (mkdir — portable, no flock on macOS).
@@ -30,10 +30,10 @@
 #        --permission-mode dontAsk + --allowedTools    — anything not allowed
 #          is denied immediately; a headless run never waits on a prompt.
 #   4. A hard timeout (AGENT_TIMEOUT_SEC): a live process is not proof of work.
-#   5. Afterwards checks the card. If the agent left it in approved/analyst/
+#   5. Afterwards checks the card. If the agent left it in approved/
 #      in_progress, the launcher moves it to blocked with the exit code, the
 #      reason and the log path. Optional KANBAN_GATE_CMD (e.g. the test
-#      suite) must pass before a card stays in testing.
+#      suite) must pass before a card stays in results (or testing).
 #
 # Exit codes: 0 done (whatever the outcome, it is on the card); 75 the model's
 # usage limit was hit — the kanban does not count it against max_runs;
@@ -44,7 +44,9 @@
 #   KANBAN_LAUNCHER_ACTOR agent:launcher       — name in the card history
 #   AGENT_TIMEOUT_SEC     3600
 #   CLAUDE_BIN            path to the claude CLI (auto-detected otherwise)
-#   CLAUDE_MODEL_S/M/L    model per card size, e.g. CLAUDE_MODEL_S=claude-haiku-4-5
+#   CLAUDE_MODEL_S/M/L    fallback model per card size when the card names none
+#                         (the card's own agent_model — opus/sonnet/haiku, set in
+#                         Analysis or by approval — always wins)
 #   KANBAN_PERMISSION_MODE dontAsk             — or acceptEdits / bypassPermissions
 #   KANBAN_ALLOWED_TOOLS  "Bash Read Edit Write Grep Glob TodoWrite" (+ kanban tools)
 #   KANBAN_STRICT_MCP     1 — 0 also loads the project's own .mcp.json servers
@@ -128,13 +130,19 @@ TASK_JSON="$(api_get "/api/tasks/$TASK_ID?history_limit=0")" || {
     log "kanban not reachable at $KANBAN_URL"; exit 1; }
 STATUS="$(json_field "$TASK_JSON" status)"
 case "$STATUS" in
-    approved|analyst) ;;
+    approved) ;;
     *) log "card is in '$STATUS' now, not approved — nothing to do"; exit 0 ;;
 esac
 TITLE="$(json_field "$TASK_JSON" title)"
 DESC="$(json_field "$TASK_JSON" description)"
 ACCEPTANCE="$(json_field "$TASK_JSON" acceptance)"
 SIZE="$(json_field "$TASK_JSON" size)"
+CARD_MODEL="$(json_field "$TASK_JSON" agent_model)"
+TASK_TYPE="$(json_field "$TASK_JSON" type)"
+STORY_AS_A="$(json_field "$TASK_JSON" story_as_a)"
+STORY_I_WANT="$(json_field "$TASK_JSON" story_i_want)"
+STORY_SO_THAT="$(json_field "$TASK_JSON" story_so_that)"
+ANALYSIS="$(json_field "$TASK_JSON" analysis_md)"
 [[ -z "$PROJECT_ID" ]] && PROJECT_ID="$(json_field "$TASK_JSON" project_id)"
 
 PROJ_PATH="$(api_get /api/projects | "$PY" -c '
@@ -190,13 +198,14 @@ trap 'rm -rf "$LOCK"' EXIT
 
 MCP_ALIAS="agent-kanban"
 MCP_CONFIG="$RUN_DIR/mcp.json"
-"$PY" - "$MCP_CONFIG" "$KANBAN_ROOT" "$DB_PATH" "$PROJECT_ID" "$PY" <<'PYEOF'
+"$PY" - "$MCP_CONFIG" "$KANBAN_ROOT" "$DB_PATH" "$PROJECT_ID" "$PY" "${CARD_MODEL:-}" <<'PYEOF'
 import json, sys
-out, root, db, project, py = sys.argv[1:6]
+out, root, db, project, py, model = sys.argv[1:7]
 json.dump({"mcpServers": {"agent-kanban": {
     "type": "stdio", "command": py, "args": ["-m", "kanban_mcp"], "cwd": root,
     "env": {"PYTHONPATH": root, "KANBAN_DB": db, "KANBAN_PROJECT_ID": project,
-            "KANBAN_ACTOR": "claude"},
+            "KANBAN_ACTOR": "claude", "KANBAN_AGENT_MODEL": model,
+            "KANBAN_STARTED_BY": "hub"},
 }}}, open(out, "w"), indent=2)
 PYEOF
 
@@ -204,28 +213,42 @@ KANBAN_TOOLS=""
 for t in columns get history pull move comment link create update search my_active board blockers; do
     KANBAN_TOOLS="$KANBAN_TOOLS mcp__${MCP_ALIAS}__kanban_$t"
 done
+for t in task_propose session_register session_status; do
+    KANBAN_TOOLS="$KANBAN_TOOLS mcp__${MCP_ALIAS}__$t"
+done
 ALLOWED="${KANBAN_ALLOWED_TOOLS:-Bash Read Edit Write Grep Glob TodoWrite}$KANBAN_TOOLS"
 
-case "$(echo "$SIZE" | tr '[:lower:]' '[:upper:]')" in
-    S) MODEL="${CLAUDE_MODEL_S:-}" ;;
-    L|XL) MODEL="${CLAUDE_MODEL_L:-}" ;;
-    *) MODEL="${CLAUDE_MODEL_M:-}" ;;
-esac
+# The card's worker model (picked in Analysis, or the project default at
+# approval) wins; the size-based variables are a fallback for older cards.
+MODEL="$CARD_MODEL"
+if [[ -z "$MODEL" ]]; then
+    case "$(echo "$SIZE" | tr '[:lower:]' '[:upper:]')" in
+        S) MODEL="${CLAUDE_MODEL_S:-}" ;;
+        L|XL) MODEL="${CLAUDE_MODEL_L:-}" ;;
+        *) MODEL="${CLAUDE_MODEL_M:-}" ;;
+    esac
+fi
+
+STORY=""
+if [[ "$TASK_TYPE" == "story" || -n "$STORY_I_WANT" ]]; then
+    STORY="User story: As ${STORY_AS_A:-a user}, I want ${STORY_I_WANT:-…}, so that ${STORY_SO_THAT:-…}."
+fi
 
 PROMPT="$RUN_DIR/prompt.md"
 cat > "$PROMPT" <<EOF
 You're connected to agent-kanban via MCP (server "$MCP_ALIAS"). Take task $TASK_ID and complete it.
 
 Workflow:
-  1. kanban_pull(task_id="$TASK_ID") — claim it (approved -> analyst).
+  1. kanban_pull(task_id="$TASK_ID") — claim it (approved -> in_progress).
   2. Plan, and write the plan as a comment via kanban_comment.
-  3. kanban_move(task_id="$TASK_ID", to_status="in_progress") before editing files.
-  4. Implement it. Along the way: kanban_comment for progress, kanban_link for PRs/files.
-  5. Verify against the acceptance criteria. Claims of "done" must be backed by
+  3. Implement it. Along the way: kanban_comment for progress, kanban_link for PRs/files.
+  4. Verify against the acceptance criteria. Claims of "done" must be backed by
      command output (tests, a run), quoted in the final comment.
-  6. kanban_move(task_id="$TASK_ID", to_status="testing", comment="<what was done, how it was verified>")
-  7. Stop. Do not move the card to "uat" / "done" — a human decides that.
+  5. kanban_move(task_id="$TASK_ID", to_status="results", comment="<what was done, how it was verified>")
+  6. Stop. Do not move the card to "done" — a human reviews it in Results.
 
+Found follow-up work outside this card's scope? Do not do it: record it with
+task_propose (it lands in the backlog for the human to approve).
 If the task is ambiguous or you are blocked, add a kanban_comment with the
 specific question and kanban_move the card to "blocked". Do not guess.
 Change only what the card asks for.
@@ -233,12 +256,16 @@ Change only what the card asks for.
 === Task ===
 ID:     $TASK_ID
 Title:  $TITLE
+$STORY
 
 Description:
 $DESC
 
 Acceptance criteria:
 $ACCEPTANCE
+
+Analysis notes:
+${ANALYSIS:-(none)}
 === End ===
 EOF
 
@@ -340,7 +367,7 @@ NOW="$(card_status)"
 # nobody moved it meanwhile (expected_from); otherwise just leave a note.
 block_if_working() {  # status reason
     case "$1" in
-        approved|analyst|in_progress)
+        approved|in_progress)
             log "BLOCK: $2"
             move blocked "launcher: $2" "$1" ;;
         *)
@@ -360,15 +387,15 @@ if [[ "$VERDICT" == "LIMIT" ]]; then
 fi
 
 case "$NOW" in
-    approved|analyst|in_progress)
+    approved|in_progress)
         block_if_working "$NOW" "agent exited (rc=$RC, $SUMMARY) but left the card in '$NOW'. Log: $RUN_DIR — $LAST_WORDS"
         exit 0 ;;
 esac
 
-if [[ "$NOW" == "testing" && -n "${KANBAN_GATE_CMD:-}" ]]; then
+if [[ ( "$NOW" == "results" || "$NOW" == "testing" ) && -n "${KANBAN_GATE_CMD:-}" ]]; then
     log "gate: $KANBAN_GATE_CMD"
     if ! (cd "$PROJ_PATH" && bash -c "$KANBAN_GATE_CMD") > "$RUN_DIR/gate.log" 2>&1; then
-        move blocked "launcher: gate failed after the agent's run — \`$KANBAN_GATE_CMD\`: $(tail -5 "$RUN_DIR/gate.log" | tr '\n' ' ' | cut -c1-400). Log: $RUN_DIR/gate.log" testing
+        move blocked "launcher: gate failed after the agent's run — \`$KANBAN_GATE_CMD\`: $(tail -5 "$RUN_DIR/gate.log" | tr '\n' ' ' | cut -c1-400). Log: $RUN_DIR/gate.log" "$NOW"
         exit 0
     fi
     comment "launcher: gate passed — \`$KANBAN_GATE_CMD\` ($(tail -1 "$RUN_DIR/gate.log" | cut -c1-200))"
